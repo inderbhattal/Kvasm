@@ -1,8 +1,78 @@
 //! Core data types for Redis-like values
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+
+/// A Redis sorted set: members ranked by (score, member), like Redis ZSETs.
+///
+/// Keeps a member -> score map for O(1) score lookup plus a BTreeSet ordered
+/// by (score, member) for rank/range queries. The two are always in sync.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SortedSet {
+    scores: HashMap<String, OrderedFloat<f64>>,
+    order: BTreeSet<(OrderedFloat<f64>, String)>,
+}
+
+impl SortedSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert or update a member. Returns true if the member was new.
+    pub fn insert(&mut self, member: &str, score: f64) -> bool {
+        let score = OrderedFloat(score);
+        match self.scores.insert(member.to_string(), score) {
+            Some(old) => {
+                if old != score {
+                    self.order.remove(&(old, member.to_string()));
+                    self.order.insert((score, member.to_string()));
+                }
+                false
+            }
+            None => {
+                self.order.insert((score, member.to_string()));
+                true
+            }
+        }
+    }
+
+    /// Remove a member. Returns true if it was present.
+    pub fn remove(&mut self, member: &str) -> bool {
+        match self.scores.remove(member) {
+            Some(score) => {
+                self.order.remove(&(score, member.to_string()));
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn score(&self, member: &str) -> Option<f64> {
+        self.scores.get(member).map(|s| s.0)
+    }
+
+    /// 0-based rank in ascending (score, member) order.
+    pub fn rank(&self, member: &str) -> Option<usize> {
+        let score = *self.scores.get(member)?;
+        self.order
+            .iter()
+            .position(|(s, m)| *s == score && m == member)
+    }
+
+    pub fn len(&self) -> usize {
+        self.scores.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.scores.is_empty()
+    }
+
+    /// Iterate members in ascending (score, member) order.
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&str, f64)> {
+        self.order.iter().map(|(s, m)| (m.as_str(), s.0))
+    }
+}
 
 /// The type of a Redis value
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,7 +104,7 @@ pub enum Value {
     String(String),
     List(VecDeque<String>),
     Set(HashSet<String>),
-    SortedSet(BTreeMap<String, OrderedFloat<f64>>), // member -> score
+    SortedSet(SortedSet),
     Hash(HashMap<String, String>),
 }
 
@@ -131,7 +201,7 @@ impl Value {
     }
 
     /// Try to get as sorted set
-    pub fn as_sorted_set(&self) -> Option<&BTreeMap<String, OrderedFloat<f64>>> {
+    pub fn as_sorted_set(&self) -> Option<&SortedSet> {
         match self {
             Value::SortedSet(z) => Some(z),
             _ => None,
@@ -139,7 +209,7 @@ impl Value {
     }
 
     /// Try to get as mutable sorted set
-    pub fn as_sorted_set_mut(&mut self) -> Option<&mut BTreeMap<String, OrderedFloat<f64>>> {
+    pub fn as_sorted_set_mut(&mut self) -> Option<&mut SortedSet> {
         match self {
             Value::SortedSet(z) => Some(z),
             _ => None,
@@ -194,20 +264,10 @@ impl Value {
     /// Get substring (start, end inclusive like Redis)
     pub fn get_range(&self, start: isize, end: isize) -> Result<String, TypeError> {
         let s = self.as_string().ok_or(TypeError::WrongType)?;
-        let len = s.chars().count() as isize;
-        if len == 0 {
+        let Some((start, end)) = Self::clamp_range(s.chars().count(), start, end) else {
             return Ok(String::new());
-        }
-
-        let start = if start < 0 { (len + start).max(0) } else { start.min(len) };
-        let end = if end < 0 { (len + end).max(-1) } else { end.min(len - 1) };
-
-        if start > end || start >= len {
-            return Ok(String::new());
-        }
-
-        let chars: Vec<char> = s.chars().collect();
-        Ok(chars[start as usize..=end as usize].iter().collect())
+        };
+        Ok(s.chars().skip(start).take(end - start).collect())
     }
 
     /// Set range (overwrite substring)
@@ -296,20 +356,10 @@ impl Value {
     /// Get range (LRANGE)
     pub fn lrange(&self, start: isize, stop: isize) -> Result<Vec<String>, TypeError> {
         let list = self.as_list().ok_or(TypeError::WrongType)?;
-        let len = list.len() as isize;
-        if len == 0 {
+        let Some((start, end)) = Self::clamp_range(list.len(), start, stop) else {
             return Ok(Vec::new());
-        }
-
-        let start = if start < 0 { (len + start).max(0) } else { start.min(len) };
-        let stop = if stop < 0 { (len + stop).max(-1) } else { stop.min(len - 1) };
-
-        if start > stop || start >= len {
-            return Ok(Vec::new());
-        }
-
-        let end = (stop as usize + 1).min(len as usize);
-        Ok(list.range(start as usize..end).cloned().collect())
+        };
+        Ok(list.range(start..end).cloned().collect())
     }
 
     /// Get length (LLEN)
@@ -387,22 +437,13 @@ impl Value {
     /// Trim list (LTRIM)
     pub fn ltrim(&mut self, start: isize, stop: isize) -> Result<(), TypeError> {
         let list = self.as_list_mut().ok_or(TypeError::WrongType)?;
-        let len = list.len() as isize;
-        if len == 0 {
-            return Ok(());
+        match Self::clamp_range(list.len(), start, stop) {
+            Some((start, end)) => {
+                list.truncate(end);
+                list.drain(..start);
+            }
+            None => list.clear(),
         }
-
-        let start = if start < 0 { (len + start).max(0) } else { start.min(len) };
-        let stop = if stop < 0 { (len + stop).max(-1) } else { stop.min(len - 1) };
-
-        if start > stop || start >= len {
-            list.clear();
-            return Ok(());
-        }
-
-        let end = (stop as usize + 1).min(len as usize);
-        let new_list: VecDeque<String> = list.range(start as usize..end).cloned().collect();
-        *list = new_list;
         Ok(())
     }
 }
@@ -482,7 +523,7 @@ impl Value {
 impl Value {
     /// Create a new sorted set value
     pub fn new_sorted_set() -> Self {
-        Value::SortedSet(BTreeMap::new())
+        Value::SortedSet(SortedSet::new())
     }
 
     /// Add members with scores (ZADD)
@@ -490,10 +531,9 @@ impl Value {
         let zset = self.as_sorted_set_mut().ok_or(TypeError::WrongType)?;
         let mut added = 0;
         for (member, score) in members {
-            if !zset.contains_key(member) {
+            if zset.insert(member, *score) {
                 added += 1;
             }
-            zset.insert(member.clone(), OrderedFloat(*score));
         }
         Ok(added)
     }
@@ -503,7 +543,7 @@ impl Value {
         let zset = self.as_sorted_set_mut().ok_or(TypeError::WrongType)?;
         let mut removed = 0;
         for m in members {
-            if zset.remove(m).is_some() {
+            if zset.remove(m) {
                 removed += 1;
             }
         }
@@ -513,109 +553,63 @@ impl Value {
     /// Get score (ZSCORE)
     pub fn zscore(&self, member: &str) -> Result<Option<f64>, TypeError> {
         self.as_sorted_set()
-            .map(|z| z.get(member).map(|s| s.into_inner()))
+            .map(|z| z.score(member))
             .ok_or(TypeError::WrongType)
     }
 
-    /// Get rank (ZRANK) - 0-based
+    /// Get rank (ZRANK) - 0-based, ascending score order
     pub fn zrank(&self, member: &str) -> Result<Option<usize>, TypeError> {
-        let zset = self.as_sorted_set().ok_or(TypeError::WrongType)?;
-        for (i, (m, _)) in zset.iter().enumerate() {
-            if m == member {
-                return Ok(Some(i));
-            }
-        }
-        Ok(None)
+        self.as_sorted_set()
+            .map(|z| z.rank(member))
+            .ok_or(TypeError::WrongType)
     }
 
     /// Get reverse rank (ZREVRANK) - 0-based, highest score is rank 0
     pub fn zrevrank(&self, member: &str) -> Result<Option<usize>, TypeError> {
         let zset = self.as_sorted_set().ok_or(TypeError::WrongType)?;
-        for (i, (m, _)) in zset.iter().rev().enumerate() {
-            if m == member {
-                return Ok(Some(i));
-            }
-        }
-        Ok(None)
+        Ok(zset.rank(member).map(|r| zset.len() - 1 - r))
     }
 
-    /// Get range by index (ZRANGE)
+    /// Clamp Redis-style (start, stop) indices to a half-open usize range.
+    /// Returns None when the range is empty.
+    fn clamp_range(len: usize, start: isize, stop: isize) -> Option<(usize, usize)> {
+        let len = len as isize;
+        if len == 0 {
+            return None;
+        }
+        let start = if start < 0 { (len + start).max(0) } else { start.min(len) };
+        let stop = if stop < 0 { (len + stop).max(-1) } else { stop.min(len - 1) };
+        if start > stop || start >= len {
+            return None;
+        }
+        Some((start as usize, stop as usize + 1))
+    }
+
+    /// Get range by index (ZRANGE), ascending score order
     pub fn zrange(&self, start: isize, stop: isize, with_scores: bool) -> Result<Vec<String>, TypeError> {
         let zset = self.as_sorted_set().ok_or(TypeError::WrongType)?;
-        let len = zset.len() as isize;
-
-        let start = if start < 0 { (len + start).max(0) } else { start.min(len) } as usize;
-        let stop = if stop < 0 { (len + stop).max(-1) } else { stop.min(len - 1) } as isize;
-
-        if start > stop as usize || start >= len as usize {
+        let Some((start, end)) = Self::clamp_range(zset.len(), start, stop) else {
             return Ok(Vec::new());
-        }
-
-        let end = (stop as usize + 1).min(len as usize);
-        let result: Vec<String> = zset
-            .keys()
-            .skip(start)
-            .take(end - start)
-            .cloned()
-            .collect();
-
-        if with_scores {
-            // Return as "member score member score..." format for Redis compatibility
-            let scores: Vec<String> = zset
-                .values()
-                .skip(start)
-                .take(end - start)
-                .map(|s| s.to_string())
-                .collect();
-            let mut combined = Vec::with_capacity(result.len() * 2);
-            for (m, s) in result.into_iter().zip(scores) {
-                combined.push(m);
-                combined.push(s);
-            }
-            Ok(combined)
-        } else {
-            Ok(result)
-        }
+        };
+        Ok(collect_range(zset.iter().skip(start).take(end - start), with_scores))
     }
 
-    /// Get reverse range by index (ZREVRANGE)
+    /// Get reverse range by index (ZREVRANGE), descending score order
     pub fn zrevrange(&self, start: isize, stop: isize, with_scores: bool) -> Result<Vec<String>, TypeError> {
         let zset = self.as_sorted_set().ok_or(TypeError::WrongType)?;
-        let len = zset.len() as isize;
-
-        let start = if start < 0 { (len + start).max(0) } else { start.min(len) } as usize;
-        let stop = if stop < 0 { (len + stop).max(-1) } else { stop.min(len - 1) } as isize;
-
-        if start > stop as usize || start >= len as usize {
+        let Some((start, end)) = Self::clamp_range(zset.len(), start, stop) else {
             return Ok(Vec::new());
-        }
-
-        let end = (stop as usize + 1).min(len as usize);
-        let keys: Vec<_> = zset.keys().cloned().collect();
-        let values: Vec<_> = zset.values().cloned().collect();
-
-        let result_keys: Vec<String> = keys.into_iter().rev().skip(start).take(end - start).collect();
-        let result_values: Vec<f64> = values.into_iter().rev().skip(start).take(end - start).map(|v| v.into_inner()).collect();
-
-        if with_scores {
-            let mut combined = Vec::with_capacity(result_keys.len() * 2);
-            for (m, s) in result_keys.into_iter().zip(result_values) {
-                combined.push(m);
-                combined.push(s.to_string());
-            }
-            Ok(combined)
-        } else {
-            Ok(result_keys)
-        }
+        };
+        Ok(collect_range(zset.iter().rev().skip(start).take(end - start), with_scores))
     }
 
-    /// Get range by score (ZRANGEBYSCORE)
+    /// Get range by score (ZRANGEBYSCORE), ascending score order
     pub fn zrangebyscore(&self, min: f64, max: f64) -> Result<Vec<(String, f64)>, TypeError> {
         let zset = self.as_sorted_set().ok_or(TypeError::WrongType)?;
         Ok(zset
             .iter()
-            .filter(|(_, v)| v.0 >= min && v.0 <= max)
-            .map(|(k, v)| (k.clone(), v.0))
+            .filter(|(_, s)| *s >= min && *s <= max)
+            .map(|(m, s)| (m.to_string(), s))
             .collect())
     }
 
@@ -627,8 +621,21 @@ impl Value {
     /// Count in score range (ZCOUNT)
     pub fn zcount(&self, min: f64, max: f64) -> Result<usize, TypeError> {
         let zset = self.as_sorted_set().ok_or(TypeError::WrongType)?;
-        Ok(zset.values().filter(|v| v.0 >= min && v.0 <= max).count())
+        Ok(zset.iter().filter(|(_, s)| *s >= min && *s <= max).count())
     }
+}
+
+/// Flatten a (member, score) iterator to Redis reply format:
+/// [member, ...] or [member, score, member, score, ...] with scores.
+fn collect_range<'a>(iter: impl Iterator<Item = (&'a str, f64)>, with_scores: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for (member, score) in iter {
+        out.push(member.to_string());
+        if with_scores {
+            out.push(score.to_string());
+        }
+    }
+    out
 }
 
 // ============================================================================
@@ -719,6 +726,48 @@ mod tests {
         // Highest score has reverse rank 0
         assert_eq!(z.zrevrank("c").unwrap(), Some(0));
         assert_eq!(z.zrevrank("a").unwrap(), Some(2));
+    }
+
+    #[test]
+    fn test_zset_orders_by_score_not_member() {
+        let mut z = Value::new_sorted_set();
+        // Member-lexicographic order (a, b, c) differs from score order (c, a, b)
+        z.zadd(&[("a".into(), 2.0), ("b".into(), 3.0), ("c".into(), 1.0)]).unwrap();
+        assert_eq!(z.zrange(0, -1, false).unwrap(), vec!["c", "a", "b"]);
+        assert_eq!(z.zrevrange(0, -1, false).unwrap(), vec!["b", "a", "c"]);
+        assert_eq!(z.zrank("c").unwrap(), Some(0));
+        assert_eq!(z.zrevrank("b").unwrap(), Some(0));
+
+        // Updating a score reorders
+        z.zadd(&[("c".into(), 10.0)]).unwrap();
+        assert_eq!(z.zrange(0, -1, false).unwrap(), vec!["a", "b", "c"]);
+        assert_eq!(z.zscore("c").unwrap(), Some(10.0));
+
+        // Ties break by member name, like Redis
+        let mut t = Value::new_sorted_set();
+        t.zadd(&[("y".into(), 1.0), ("x".into(), 1.0)]).unwrap();
+        assert_eq!(t.zrange(0, -1, false).unwrap(), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn test_zset_remove_keeps_order_in_sync() {
+        let mut z = Value::new_sorted_set();
+        z.zadd(&[("a".into(), 1.0), ("b".into(), 2.0)]).unwrap();
+        assert_eq!(z.zrem(&["a".into()]).unwrap(), 1);
+        assert_eq!(z.zrem(&["a".into()]).unwrap(), 0);
+        assert_eq!(z.zrange(0, -1, true).unwrap(), vec!["b", "2"]);
+        assert_eq!(z.zcard().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_zrange_negative_stop_out_of_range() {
+        let mut z = Value::new_sorted_set();
+        z.zadd(&[("a".into(), 1.0), ("b".into(), 2.0), ("c".into(), 3.0)]).unwrap();
+        // Previously overflowed (panic in debug builds)
+        assert!(z.zrange(0, -10, false).unwrap().is_empty());
+        assert!(z.zrevrange(0, -10, false).unwrap().is_empty());
+        assert_eq!(z.zrange(-2, -1, false).unwrap(), vec!["b", "c"]);
+        assert_eq!(z.zrevrange(0, 0, false).unwrap(), vec!["c"]);
     }
 
     #[test]
