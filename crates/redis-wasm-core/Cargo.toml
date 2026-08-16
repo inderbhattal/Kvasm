@@ -1,0 +1,25 @@
+[package]
+name = "redis-wasm-core"
+version = { workspace = true }
+edition = "2021"
+description = "Core Redis-like data structures and operations (no WASM dependencies)"
+license = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+bincode = { workspace = true }
+dashmap = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+regex = "1.10"
+async-trait = "0.1"
+parking_lot = "0.12"
+ordered-float = { workspace = true }
+
+# For native async operations (tests)
+tokio = { workspace = true, optional = true }
+
+[features]
+default = []
+native = ["tokio"]
