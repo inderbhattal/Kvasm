@@ -90,44 +90,11 @@ pub mod native {
     }
 }
 
-/// WASM-compatible WAL writer using IndexedDB
-/// This is a placeholder - actual implementation is in redis-wasm-bindings
-pub struct WasmWalWriter {
-    // In WASM, we use the IndexedDB implementation from bindings crate
-    // This struct exists for type compatibility
-    _private: (),
-}
-
-impl WasmWalWriter {
-    /// Create a new WASM WAL writer (placeholder)
-    pub fn new() -> Self {
-        Self { _private: () }
-    }
-}
-
-#[async_trait]
-impl WalWriterTrait for WasmWalWriter {
-    async fn append(&self, _entry: &WalEntry) -> Result<(), WalError> {
-        // Actual implementation delegates to JS via wasm-bindgen
-        Ok(())
-    }
-
-    async fn flush(&self) -> Result<(), WalError> {
-        Ok(())
-    }
-
-    async fn size(&self) -> Result<u64, WalError> {
-        Ok(0)
-    }
-}
-
 /// Type-erased WAL writer for use in RedisWasmDb
 pub type WalWriter = Arc<dyn WalWriterTrait>;
 
 #[cfg(test)]
-#[cfg(feature = "native")]
 mod tests {
-    use super::*;
     use crate::wal::log::WalEntry;
 
     #[tokio::test]

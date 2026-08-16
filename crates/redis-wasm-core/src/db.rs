@@ -21,6 +21,8 @@ pub enum DbError {
     ExpiryError(String),
     #[error("PubSub error: {0}")]
     PubSubError(String),
+    #[error("Invalid pattern: {0}")]
+    InvalidPattern(String),
 }
 
 /// Main Redis-like database.
@@ -132,8 +134,13 @@ impl RedisWasmDb {
             return Ok(None);
         }
 
-        Ok(self.data.get(key)
-            .and_then(|v| v.as_string().cloned()))
+        match self.data.get(key) {
+            None => Ok(None),
+            Some(v) => v.as_string()
+                .cloned()
+                .map(Some)
+                .ok_or(DbError::WrongType(TypeError::WrongType)),
+        }
     }
 
     /// Delete keys (DEL) — synchronous, no WAL.
@@ -167,8 +174,7 @@ impl RedisWasmDb {
         let mut count = 0;
         for key in keys {
             if self.expiry.is_expired(key) {
-                self.data.remove(*key);
-                self.expiry.remove(*key);
+                self.del(&[key])?;
             } else if self.data.contains_key(*key) {
                 count += 1;
             }
@@ -179,8 +185,7 @@ impl RedisWasmDb {
     /// Get key type (TYPE)
     pub fn type_(&self, key: &str) -> Result<ValueType, DbError> {
         if self.expiry.is_expired(key) {
-            self.data.remove(key);
-            self.expiry.remove(key);
+            self.del(&[key])?;
             return Ok(ValueType::None);
         }
 
@@ -193,7 +198,7 @@ impl RedisWasmDb {
     pub fn keys(&self, pattern: &str) -> Result<Vec<String>, DbError> {
         let regex_pattern = glob_to_regex(pattern);
         let regex = regex::Regex::new(&format!("^{}$", regex_pattern))
-            .map_err(|_| DbError::WrongType(TypeError::WrongType))?;
+            .map_err(|e| DbError::InvalidPattern(e.to_string()))?;
 
         let mut result = Vec::new();
         for entry in self.data.iter() {
@@ -228,13 +233,16 @@ impl RedisWasmDb {
             self.del(&[key])?;
         }
 
-        let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_empty_string);
-        let new_len = entry.append(value)?;
-
-        let wal_entry = WalEntry::Set {
-            key: key.to_string(),
-            value: entry.as_string().unwrap().clone(),
-            expiry: self.expiry.get_expiry_ms(key),
+        // Scoped so the map guard drops before the WAL await below.
+        let (new_len, wal_entry) = {
+            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_empty_string);
+            let new_len = entry.append(value)?;
+            let wal_entry = WalEntry::Set {
+                key: key.to_string(),
+                value: entry.as_string().unwrap().clone(),
+                expiry: self.expiry.get_expiry_ms(key),
+            };
+            (new_len, wal_entry)
         };
         self.write_wal(&wal_entry).await?;
 
@@ -260,13 +268,15 @@ impl RedisWasmDb {
             self.del(&[key])?;
         }
 
-        let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_empty_string);
-        let new_len = entry.set_range(offset, value)?;
-
-        let wal_entry = WalEntry::Set {
-            key: key.to_string(),
-            value: entry.as_string().unwrap().clone(),
-            expiry: self.expiry.get_expiry_ms(key),
+        let (new_len, wal_entry) = {
+            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_empty_string);
+            let new_len = entry.set_range(offset, value)?;
+            let wal_entry = WalEntry::Set {
+                key: key.to_string(),
+                value: entry.as_string().unwrap().clone(),
+                expiry: self.expiry.get_expiry_ms(key),
+            };
+            (new_len, wal_entry)
         };
         self.write_wal(&wal_entry).await?;
 
@@ -283,16 +293,14 @@ impl RedisWasmDb {
             self.del(&[key])?;
         }
 
-        let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_list);
-        let new_len = entry.lpush(values)?;
-
-        if let Some(wal) = &self.wal {
-            let wal_entry = WalEntry::LPush {
-                key: key.to_string(),
-                values: values.to_vec(),
-            };
-            self.write_wal(&wal_entry).await?;
-        }
+        let new_len = {
+            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_list);
+            entry.lpush(values)?
+        };
+        self.write_wal(&WalEntry::LPush {
+            key: key.to_string(),
+            values: values.to_vec(),
+        }).await?;
 
         Ok(new_len)
     }
@@ -303,16 +311,14 @@ impl RedisWasmDb {
             self.del(&[key])?;
         }
 
-        let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_list);
-        let new_len = entry.rpush(values)?;
-
-        if let Some(wal) = &self.wal {
-            let wal_entry = WalEntry::RPush {
-                key: key.to_string(),
-                values: values.to_vec(),
-            };
-            self.write_wal(&wal_entry).await?;
-        }
+        let new_len = {
+            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_list);
+            entry.rpush(values)?
+        };
+        self.write_wal(&WalEntry::RPush {
+            key: key.to_string(),
+            values: values.to_vec(),
+        }).await?;
 
         Ok(new_len)
     }
@@ -324,15 +330,15 @@ impl RedisWasmDb {
             return Ok(Vec::new());
         }
 
-        let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
-        let result = entry.lpop(count)?;
-
+        let result = {
+            let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
+            entry.lpop(count)?
+        };
         if !result.is_empty() {
-            let wal_entry = WalEntry::LPop {
+            self.write_wal(&WalEntry::LPop {
                 key: key.to_string(),
                 count,
-            };
-            self.write_wal(&wal_entry).await?;
+            }).await?;
         }
 
         Ok(result)
@@ -345,15 +351,15 @@ impl RedisWasmDb {
             return Ok(Vec::new());
         }
 
-        let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
-        let result = entry.rpop(count)?;
-
+        let result = {
+            let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
+            entry.rpop(count)?
+        };
         if !result.is_empty() {
-            let wal_entry = WalEntry::RPop {
+            self.write_wal(&WalEntry::RPop {
                 key: key.to_string(),
                 count,
-            };
-            self.write_wal(&wal_entry).await?;
+            }).await?;
         }
 
         Ok(result)
@@ -409,14 +415,11 @@ impl RedisWasmDb {
             .ok_or(DbError::KeyNotFound)?
             .lset(index, value.clone())?;
 
-        if let Some(wal) = &self.wal {
-            let wal_entry = WalEntry::LSet {
-                key: key.to_string(),
-                index,
-                value,
-            };
-            self.write_wal(&wal_entry).await?;
-        }
+        self.write_wal(&WalEntry::LSet {
+            key: key.to_string(),
+            index,
+            value,
+        }).await?;
 
         Ok(())
     }
@@ -433,12 +436,11 @@ impl RedisWasmDb {
             .lrem(count, value)?;
 
         if removed > 0 {
-            let wal_entry = WalEntry::LRem {
+            self.write_wal(&WalEntry::LRem {
                 key: key.to_string(),
                 count,
                 value: value.to_string(),
-            };
-            self.write_wal(&wal_entry).await?;
+            }).await?;
         }
 
         Ok(removed)
@@ -455,14 +457,11 @@ impl RedisWasmDb {
             .ok_or(DbError::KeyNotFound)?
             .ltrim(start, stop)?;
 
-        if let Some(wal) = &self.wal {
-            let wal_entry = WalEntry::LTrim {
-                key: key.to_string(),
-                start,
-                stop,
-            };
-            self.write_wal(&wal_entry).await?;
-        }
+        self.write_wal(&WalEntry::LTrim {
+            key: key.to_string(),
+            start,
+            stop,
+        }).await?;
 
         Ok(())
     }
@@ -477,15 +476,15 @@ impl RedisWasmDb {
             self.del(&[key])?;
         }
 
-        let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_set);
-        let added = entry.sadd(members)?;
-
+        let added = {
+            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_set);
+            entry.sadd(members)?
+        };
         if added > 0 {
-            let wal_entry = WalEntry::SAdd {
+            self.write_wal(&WalEntry::SAdd {
                 key: key.to_string(),
                 members: members.to_vec(),
-            };
-            self.write_wal(&wal_entry).await?;
+            }).await?;
         }
 
         Ok(added)
@@ -498,15 +497,15 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
-        let removed = entry.srem(members)?;
-
+        let removed = {
+            let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
+            entry.srem(members)?
+        };
         if removed > 0 {
-            let wal_entry = WalEntry::SRem {
+            self.write_wal(&WalEntry::SRem {
                 key: key.to_string(),
                 members: members.to_vec(),
-            };
-            self.write_wal(&wal_entry).await?;
+            }).await?;
         }
 
         Ok(removed)
@@ -656,16 +655,16 @@ impl RedisWasmDb {
             self.del(&[key])?;
         }
 
-        let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_sorted_set);
-        let added = entry.zadd(members)?;
-
+        let added = {
+            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_sorted_set);
+            entry.zadd(members)?
+        };
         // Always persist: ZADD may update the score of an existing member
         // (added == 0), which is still a mutation that must be replayed.
-        let wal_entry = WalEntry::ZAdd {
+        self.write_wal(&WalEntry::ZAdd {
             key: key.to_string(),
             members: members.to_vec(),
-        };
-        self.write_wal(&wal_entry).await?;
+        }).await?;
 
         Ok(added)
     }
@@ -677,15 +676,15 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
-        let removed = entry.zrem(members)?;
-
+        let removed = {
+            let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
+            entry.zrem(members)?
+        };
         if removed > 0 {
-            let wal_entry = WalEntry::ZRem {
+            self.write_wal(&WalEntry::ZRem {
                 key: key.to_string(),
                 members: members.to_vec(),
-            };
-            self.write_wal(&wal_entry).await?;
+            }).await?;
         }
 
         Ok(removed)
@@ -805,17 +804,15 @@ impl RedisWasmDb {
             self.del(&[key])?;
         }
 
-        let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_hash);
-        let result = entry.hset(field.clone(), value.clone())?;
-
-        if let Some(wal) = &self.wal {
-            let wal_entry = WalEntry::HSet {
-                key: key.to_string(),
-                field,
-                value,
-            };
-            self.write_wal(&wal_entry).await?;
-        }
+        let result = {
+            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_hash);
+            entry.hset(field.clone(), value.clone())?
+        };
+        self.write_wal(&WalEntry::HSet {
+            key: key.to_string(),
+            field,
+            value,
+        }).await?;
 
         Ok(result)
     }
@@ -853,15 +850,15 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
-        let deleted = entry.hdel(fields)?;
-
+        let deleted = {
+            let mut entry = self.data.get_mut(key).ok_or(DbError::KeyNotFound)?;
+            entry.hdel(fields)?
+        };
         if deleted > 0 {
-            let wal_entry = WalEntry::HDel {
+            self.write_wal(&WalEntry::HDel {
                 key: key.to_string(),
                 fields: fields.to_vec(),
-            };
-            self.write_wal(&wal_entry).await?;
+            }).await?;
         }
 
         Ok(deleted)

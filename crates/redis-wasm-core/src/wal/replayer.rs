@@ -120,6 +120,25 @@ pub trait WalReader: Send + Sync {
     async fn next_entry(&mut self) -> Result<Option<WalEntry>, WalError>;
 }
 
+/// In-memory WAL reader over a pre-loaded list of entries. Used when the
+/// backing store (e.g. IndexedDB in WASM) is read in one batch.
+pub struct VecWalReader {
+    entries: std::vec::IntoIter<WalEntry>,
+}
+
+impl VecWalReader {
+    pub fn new(entries: Vec<WalEntry>) -> Self {
+        Self { entries: entries.into_iter() }
+    }
+}
+
+#[async_trait::async_trait]
+impl WalReader for VecWalReader {
+    async fn next_entry(&mut self) -> Result<Option<WalEntry>, WalError> {
+        Ok(self.entries.next())
+    }
+}
+
 /// Native file-based WAL reader
 #[cfg(feature = "native")]
 pub mod native {
@@ -165,59 +184,19 @@ pub mod native {
     }
 }
 
-/// WASM-compatible WAL reader using IndexedDB
-pub struct WasmWalReader {
-    _private: (),
-}
-
-impl WasmWalReader {
-    pub fn new() -> Self {
-        Self { _private: () }
-    }
-}
-
-#[async_trait::async_trait]
-impl WalReader for WasmWalReader {
-    async fn next_entry(&mut self) -> Result<Option<WalEntry>, WalError> {
-        // Actual implementation delegates to JS via wasm-bindgen
-        Ok(None)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wal::log::WalEntry;
 
-    struct VecReader {
-        entries: Vec<WalEntry>,
-        idx: usize,
-    }
-
-    #[async_trait::async_trait]
-    impl WalReader for VecReader {
-        async fn next_entry(&mut self) -> Result<Option<WalEntry>, WalError> {
-            if self.idx < self.entries.len() {
-                let entry = self.entries[self.idx].clone();
-                self.idx += 1;
-                Ok(Some(entry))
-            } else {
-                Ok(None)
-            }
-        }
-    }
-
     #[tokio::test]
     async fn test_replay_lpush_creates_list() {
         let db = Arc::new(RedisWasmDb::new());
         let replayer = WalReplayer::new(db.clone());
-        let mut reader = VecReader {
-            entries: vec![WalEntry::LPush {
+        let mut reader = VecWalReader::new(vec![WalEntry::LPush {
                 key: "list".into(),
                 values: vec!["a".into(), "b".into()],
-            }],
-            idx: 0,
-        };
+            }]);
         replayer.replay(&mut reader).await.unwrap();
         assert_eq!(db.lrange("list", 0, -1).unwrap(), vec!["b", "a"]);
     }
@@ -227,14 +206,11 @@ mod tests {
         let db = Arc::new(RedisWasmDb::new());
         db.expiry_for_replay().set_expiry_at("k", 9_999_999_999_999);
         let replayer = WalReplayer::new(db.clone());
-        let mut reader = VecReader {
-            entries: vec![WalEntry::Set {
+        let mut reader = VecWalReader::new(vec![WalEntry::Set {
                 key: "k".into(),
                 value: "v".into(),
                 expiry: None,
-            }],
-            idx: 0,
-        };
+            }]);
         replayer.replay(&mut reader).await.unwrap();
         assert_eq!(db.get("k").unwrap(), Some("v".to_string()));
         assert_eq!(db.ttl("k").unwrap(), -1);
@@ -245,13 +221,10 @@ mod tests {
         let db = Arc::new(RedisWasmDb::new());
         let replayer = WalReplayer::new(db.clone());
         let ts = 1_234_567_890u64;
-        let mut reader = VecReader {
-            entries: vec![WalEntry::Expire {
+        let mut reader = VecWalReader::new(vec![WalEntry::Expire {
                 key: "k".into(),
                 expiry_ms: ts,
-            }],
-            idx: 0,
-        };
+            }]);
         replayer.replay(&mut reader).await.unwrap();
         // Must be stored as an absolute timestamp, not now + ts.
         assert_eq!(db.expiry_for_replay().get_expiry_ms("k"), Some(ts));

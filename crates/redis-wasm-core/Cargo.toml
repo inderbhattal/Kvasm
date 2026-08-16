@@ -20,6 +20,10 @@ ordered-float = { workspace = true }
 # For native async operations (tests)
 tokio = { workspace = true, optional = true }
 
+[dev-dependencies]
+# Tests use #[tokio::test] regardless of the `native` feature
+tokio = { workspace = true }
+
 [features]
 default = []
 native = ["tokio"]

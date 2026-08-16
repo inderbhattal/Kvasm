@@ -12,6 +12,7 @@ pub struct Channel {
     #[cfg(feature = "native")]
     tx: broadcast::Sender<String>,
     #[cfg(not(feature = "native"))]
+    #[allow(dead_code)]
     tx: (),
     /// Subscriber count
     subscriber_count: Arc<std::sync::atomic::AtomicUsize>,
@@ -41,6 +42,7 @@ impl Channel {
         }
         #[cfg(not(feature = "native"))]
         {
+            let _ = message;
             0
         }
     }
@@ -120,12 +122,16 @@ impl PubSubManager {
         self.get_or_create(channel).subscribe()
     }
 
-    /// Unsubscribe from a channel (decrements count)
+    /// Unsubscribe from a channel. Call after dropping the receiver — the
+    /// broadcast channel itself has no explicit unsubscribe, so this only
+    /// keeps the manual subscriber count in sync.
     pub fn unsubscribe(&self, channel: &str) {
         if let Some(ch) = self.get(channel) {
-            // Note: broadcast doesn't support explicit unsubscribe
-            // The receiver is just dropped
-            // We could track subscriber count manually if needed
+            let _ = ch.subscriber_count.fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |n| n.checked_sub(1),
+            );
         }
     }
 
@@ -161,19 +167,18 @@ pub struct PubSubMessage {
 
 impl PubSubMessage {
     pub fn new(channel: String, message: String) -> Self {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        // current_time_ms is wasm-safe; SystemTime::now() panics on
+        // wasm32-unknown-unknown.
+        let timestamp = crate::expiry::current_time_ms();
         Self { channel, message, timestamp }
     }
 }
 
 #[cfg(test)]
+#[cfg(feature = "native")]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_pubsub_basic() {
         let manager = PubSubManager::new();
@@ -192,7 +197,6 @@ mod tests {
         assert_eq!(msg2, "hello");
     }
 
-    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_pubsub_multiple_channels() {
         let manager = PubSubManager::new();
@@ -207,7 +211,6 @@ mod tests {
         assert_eq!(rx2.recv().await.unwrap(), "msg2");
     }
 
-    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_pubsub_no_subscribers() {
         let manager = PubSubManager::new();

@@ -1,9 +1,7 @@
 //! Expiry/TTL management
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
-use parking_lot::RwLock;
 
 /// Expiry manager for handling key TTLs.
 ///
@@ -134,8 +132,8 @@ pub fn current_time_ms() -> u64 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64
     }
@@ -155,25 +153,27 @@ pub fn set_now_ms(now_ms: u64) {
     NOW_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Background expiry cleaner
+/// Background expiry cleaner (native only — WASM drives cleanup from JS
+/// via `setInterval`, see the bindings crate).
+#[cfg(feature = "native")]
 pub struct ExpiryCleaner {
-    manager: Arc<ExpiryManager>,
-    db: Arc<crate::db::RedisWasmDb>,
-    running: Arc<RwLock<bool>>,
+    manager: ExpiryManager,
+    db: crate::db::RedisWasmDb,
+    running: Arc<parking_lot::RwLock<bool>>,
 }
 
+#[cfg(feature = "native")]
 impl ExpiryCleaner {
     /// Create a new expiry cleaner
-    pub fn new(manager: Arc<ExpiryManager>, db: Arc<crate::db::RedisWasmDb>) -> Self {
+    pub fn new(manager: ExpiryManager, db: crate::db::RedisWasmDb) -> Self {
         Self {
             manager,
             db,
-            running: Arc::new(RwLock::new(false)),
+            running: Arc::new(parking_lot::RwLock::new(false)),
         }
     }
 
-    /// Start the background cleaner (native only)
-    #[cfg(feature = "native")]
+    /// Start the background cleaner
     pub fn start(&self) {
         *self.running.write() = true;
         let manager = self.manager.clone();
@@ -181,7 +181,7 @@ impl ExpiryCleaner {
         let running = self.running.clone();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
             while *running.read() {
                 interval.tick().await;
                 manager.cleanup_expired(|key| {
@@ -189,12 +189,6 @@ impl ExpiryCleaner {
                 });
             }
         });
-    }
-
-    /// Start the background cleaner (WASM stub)
-    #[cfg(not(feature = "native"))]
-    pub fn start(&self) {
-        // No-op in WASM
     }
 
     /// Stop the background cleaner
