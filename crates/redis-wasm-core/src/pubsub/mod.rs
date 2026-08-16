@@ -70,17 +70,19 @@ impl Default for Channel {
     }
 }
 
-/// Pub/Sub manager
+/// Pub/Sub manager.
+///
+/// Cloning is cheap and clones share the same channel registry.
 #[derive(Clone)]
 pub struct PubSubManager {
-    channels: DashMap<String, Arc<Channel>>,
+    channels: Arc<DashMap<String, Arc<Channel>>>,
 }
 
 impl PubSubManager {
     /// Create a new pub/sub manager
     pub fn new() -> Self {
         Self {
-            channels: DashMap::new(),
+            channels: Arc::new(DashMap::new()),
         }
     }
 

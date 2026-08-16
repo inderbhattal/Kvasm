@@ -5,29 +5,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
-/// Expiry manager for handling key TTLs
+/// Expiry manager for handling key TTLs.
+///
+/// Cloning is cheap and clones share the same expiry table.
 #[derive(Clone)]
 pub struct ExpiryManager {
-    /// Key -> expiry timestamp (milliseconds since epoch)
-    expiries: DashMap<String, u64>,
-    /// Background cleanup interval
-    cleanup_interval: Duration,
+    /// Key -> expiry timestamp (milliseconds since epoch), shared between clones
+    expiries: Arc<DashMap<String, u64>>,
 }
 
 impl ExpiryManager {
     /// Create a new expiry manager
     pub fn new() -> Self {
         Self {
-            expiries: DashMap::new(),
-            cleanup_interval: Duration::from_millis(100),
-        }
-    }
-
-    /// Create with custom cleanup interval
-    pub fn with_interval(cleanup_interval: Duration) -> Self {
-        Self {
-            expiries: DashMap::new(),
-            cleanup_interval,
+            expiries: Arc::new(DashMap::new()),
         }
     }
 

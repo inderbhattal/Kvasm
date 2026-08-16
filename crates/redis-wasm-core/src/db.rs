@@ -23,15 +23,18 @@ pub enum DbError {
     PubSubError(String),
 }
 
-/// Main Redis-like database
+/// Main Redis-like database.
+///
+/// Cloning is cheap and clones share the same underlying storage — a clone
+/// sees and performs the same reads/writes as the original.
 #[derive(Clone)]
 pub struct RedisWasmDb {
-    /// Main key-value storage
-    data: DashMap<String, Value>,
+    /// Main key-value storage (shared between clones)
+    data: Arc<DashMap<String, Value>>,
     /// Expiry manager for TTL
     expiry: ExpiryManager,
     /// Optional WAL writer for persistence
-    wal: Option<Arc<WalWriter>>,
+    wal: Option<WalWriter>,
     /// Pub/Sub manager
     pubsub: PubSubManager,
 }
@@ -40,7 +43,7 @@ impl RedisWasmDb {
     /// Create a new in-memory database without persistence
     pub fn new() -> Self {
         Self {
-            data: DashMap::new(),
+            data: Arc::new(DashMap::new()),
             expiry: ExpiryManager::new(),
             wal: None,
             pubsub: PubSubManager::new(),
@@ -50,9 +53,9 @@ impl RedisWasmDb {
     /// Create a new database with WAL persistence
     pub fn with_wal(wal: WalWriter) -> Self {
         Self {
-            data: DashMap::new(),
+            data: Arc::new(DashMap::new()),
             expiry: ExpiryManager::new(),
-            wal: Some(Arc::new(wal)),
+            wal: Some(wal),
             pubsub: PubSubManager::new(),
         }
     }
@@ -1082,6 +1085,21 @@ mod tests {
         db.set("k", "v2".to_string()).await.unwrap();
         assert_eq!(db.ttl("k").unwrap(), -1);
         assert_eq!(db.get("k").unwrap(), Some("v2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_clone_shares_state() {
+        let db = RedisWasmDb::new();
+        let clone = db.clone();
+
+        clone.set("k", "v".to_string()).await.unwrap();
+        assert_eq!(db.get("k").unwrap(), Some("v".to_string()));
+
+        clone.expire("k", 100).await.unwrap();
+        assert!(db.ttl("k").unwrap() > 0);
+
+        db.del_async(&["k"]).await.unwrap();
+        assert_eq!(clone.get("k").unwrap(), None);
     }
 
     #[tokio::test]
