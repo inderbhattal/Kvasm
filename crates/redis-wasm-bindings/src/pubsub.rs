@@ -1,171 +1,143 @@
-//! WASM-specific Pub/Sub using BroadcastChannel API
+//! WASM Pub/Sub: local subscribers within this JS context, plus cross-tab
+//! delivery via the BroadcastChannel API.
+//!
+//! `BroadcastChannel` never delivers a message back to the context that
+//! posted it, so publish sends to local subscribers directly and lets the
+//! browser fan out to other tabs/workers.
 
-use crate::{RedisWasmDb, DbError, ToJsValue, WasmDb, JsValue};
-use redis_wasm_core::pubsub::PubSubMessage;
-use std::sync::Arc;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
-use web_sys::{BroadcastChannel, MessageEvent, Window};
 use futures::channel::mpsc;
 use futures::StreamExt;
+use redis_wasm_core::pubsub::PubSubMessage;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use web_sys::{BroadcastChannel, MessageEvent};
 
-/// A Pub/Sub channel wrapper for WASM using BroadcastChannel
+type Subscribers = Rc<RefCell<Vec<mpsc::UnboundedSender<String>>>>;
+
+struct ChannelState {
+    broadcast: BroadcastChannel,
+    subscribers: Subscribers,
+    /// Keeps the onmessage callback alive for the channel's lifetime.
+    _onmessage: Closure<dyn FnMut(MessageEvent)>,
+}
+
+/// Pub/Sub hub for this JS context
 #[wasm_bindgen]
-pub struct WasmBroadcastChannel {
-    channel: BroadcastChannel,
-    name: String,
-    // For local subscribers (same tab)
-    local_tx: Option<mpsc::UnboundedSender<String>>,
+pub struct WasmPubSub {
+    channels: HashMap<String, ChannelState>,
+}
+
+impl Default for WasmPubSub {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[wasm_bindgen]
-impl WasmBroadcastChannel {
-    /// Create a new channel
+impl WasmPubSub {
     #[wasm_bindgen(constructor)]
-    pub fn new(name: &str) -> Result<WasmBroadcastChannel, JsValue> {
-        let channel = BroadcastChannel::new(name)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create BroadcastChannel: {:?}", e)))?;
-
-        Ok(WasmBroadcastChannel {
-            channel,
-            name: name.to_string(),
-            local_tx: None,
-        })
+    pub fn new() -> WasmPubSub {
+        WasmPubSub {
+            channels: HashMap::new(),
+        }
     }
 
-    /// Publish a message to the channel
-    #[wasm_bindgen(js_name = "publish")]
-    pub fn publish(&self, message: &str) -> Result<usize, JsValue> {
-        let message = PubSubMessage::new(self.name.clone(), message.to_string());
-        let json = serde_json::to_string(&message)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    /// Publish a message. Returns the number of local subscribers it was
+    /// delivered to (cross-tab subscriber counts are unknowable).
+    pub fn publish(&mut self, channel: &str, message: &str) -> Result<usize, JsValue> {
+        let state = self.channel_state(channel)?;
 
-        self.channel.post_message(&JsValue::from_str(&json))
+        let envelope = PubSubMessage::new(channel.to_string(), message.to_string());
+        let json = serde_json::to_string(&envelope)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        state
+            .broadcast
+            .post_message(&JsValue::from_str(&json))
             .map_err(|e| JsValue::from_str(&format!("Failed to post message: {:?}", e)))?;
 
-        // Also send to local subscribers
-        if let Some(tx) = &self.local_tx {
-            let _ = tx.unbounded_send(message.message);
-        }
-
-        // Return 0 for now (we can't know the subscriber count across tabs)
-        Ok(0)
+        Ok(deliver_local(&state.subscribers, message))
     }
 
-    /// Subscribe to the channel - returns an async iterator
-    /// This is a simplified version that only works for local subscribers
-    pub fn subscribe(&self) -> Result<WasmBroadcastChannelSubscriber, JsValue> {
-        let (tx, rx) = mpsc::unbounded::<String>();
+    /// Subscribe to a channel. The returned subscriber receives messages
+    /// published in this context and in other tabs/workers.
+    pub fn subscribe(&mut self, channel: &str) -> Result<WasmSubscriber, JsValue> {
+        let state = self.channel_state(channel)?;
+        let (tx, rx) = mpsc::unbounded();
+        state.subscribers.borrow_mut().push(tx);
+        Ok(WasmSubscriber { rx })
+    }
 
-        // Note: We can't easily modify self.local_tx from here since it's &self
-        // In a real implementation, we'd use interior mutability
-
-        Ok(WasmBroadcastChannelSubscriber { rx })
+    /// Number of local subscribers on a channel
+    #[wasm_bindgen(js_name = "subscriberCount")]
+    pub fn subscriber_count(&self, channel: &str) -> usize {
+        self.channels
+            .get(channel)
+            .map(|state| {
+                let mut subs = state.subscribers.borrow_mut();
+                subs.retain(|tx| !tx.is_closed());
+                subs.len()
+            })
+            .unwrap_or(0)
     }
 }
 
-/// Subscriber for a WASM channel
+impl WasmPubSub {
+    fn channel_state(&mut self, name: &str) -> Result<&ChannelState, JsValue> {
+        if !self.channels.contains_key(name) {
+            let broadcast = BroadcastChannel::new(name).map_err(|e| {
+                JsValue::from_str(&format!("Failed to create BroadcastChannel: {:?}", e))
+            })?;
+
+            let subscribers: Subscribers = Rc::new(RefCell::new(Vec::new()));
+            let subs = subscribers.clone();
+            let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+                if let Some(json) = event.data().as_string() {
+                    if let Ok(envelope) = serde_json::from_str::<PubSubMessage>(&json) {
+                        deliver_local(&subs, &envelope.message);
+                    }
+                }
+            });
+            broadcast.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+
+            self.channels.insert(
+                name.to_string(),
+                ChannelState {
+                    broadcast,
+                    subscribers,
+                    _onmessage: onmessage,
+                },
+            );
+        }
+        Ok(self.channels.get(name).unwrap())
+    }
+}
+
+/// Send to every live local subscriber, pruning dropped ones
+fn deliver_local(subscribers: &Subscribers, message: &str) -> usize {
+    let mut subs = subscribers.borrow_mut();
+    subs.retain(|tx| !tx.is_closed());
+    let mut delivered = 0;
+    for tx in subs.iter() {
+        if tx.unbounded_send(message.to_string()).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
+/// Async message stream for one subscription. Drop it to unsubscribe.
 #[wasm_bindgen]
-pub struct WasmBroadcastChannelSubscriber {
+pub struct WasmSubscriber {
     rx: mpsc::UnboundedReceiver<String>,
 }
 
 #[wasm_bindgen]
-impl WasmBroadcastChannelSubscriber {
-    /// Get the next message (async)
+impl WasmSubscriber {
+    /// Await the next message (resolves to undefined if the hub is dropped)
     pub async fn next(&mut self) -> Option<String> {
         self.rx.next().await
-    }
-}
-
-/// Start the Pub/Sub listener for a database using BroadcastChannel
-/// This sets up cross-tab communication
-#[wasm_bindgen]
-pub fn start_pubsub_listener(db: &WasmDb) -> Result<(), JsValue> {
-    let inner = db.inner.clone();
-
-    // Get the window object
-    let window = web_sys::window().ok_or_else(|| JsValue::from_str("No window object"))?;
-
-    // We need to listen for messages on all channels the user subscribes to
-    // This is a simplified version - in practice you'd want to track channels
-
-    Ok(())
-}
-
-/// A Pub/Sub manager for WASM that uses BroadcastChannel
-#[wasm_bindgen]
-pub struct WasmPubSubManager {
-    channels: std::collections::HashMap<String, BroadcastChannel>,
-    local_channels: std::collections::HashMap<String, mpsc::UnboundedSender<String>>,
-}
-
-#[wasm_bindgen]
-impl WasmPubSubManager {
-    /// Create a new Pub/Sub manager
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> WasmPubSubManager {
-        WasmPubSubManager {
-            channels: std::collections::HashMap::new(),
-            local_channels: std::collections::HashMap::new(),
-        }
-    }
-
-    /// Get or create a channel
-    pub fn get_channel(&mut self, name: &str) -> Result<WasmBroadcastChannel, JsValue> {
-        if let Some(channel) = self.channels.get(name) {
-            return Ok(WasmBroadcastChannel {
-                channel: channel.clone(),
-                name: name.to_string(),
-                local_tx: self.local_channels.get(name).cloned(),
-            });
-        }
-
-        let channel = BroadcastChannel::new(name)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create BroadcastChannel: {:?}", e)))?;
-
-        let (tx, _rx) = mpsc::unbounded::<String>();
-
-        self.channels.insert(name.to_string(), channel.clone());
-        self.local_channels.insert(name.to_string(), tx);
-
-        Ok(WasmBroadcastChannel {
-            channel,
-            name: name.to_string(),
-            local_tx: Some(self.local_channels.get(name).unwrap().clone()),
-        })
-    }
-
-    /// Publish a message to a channel
-    pub fn publish(&self, channel: &str, message: &str) -> Result<usize, JsValue> {
-        if let Some(bc) = self.channels.get(channel) {
-            let msg = PubSubMessage::new(channel.to_string(), message.to_string());
-            let json = serde_json::to_string(&msg)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-            bc.post_message(&JsValue::from_str(&json))
-                .map_err(|e| JsValue::from_str(&format!("Failed to post message: {:?}", e)))?;
-
-            // Also send to local subscribers
-            if let Some(tx) = self.local_channels.get(channel) {
-                let _ = tx.unbounded_send(message.to_string());
-            }
-
-            Ok(0)
-        } else {
-            Ok(0)
-        }
-    }
-
-    /// Subscribe to a channel
-    pub fn subscribe(&self, channel: &str) -> Result<WasmBroadcastChannelSubscriber, JsValue> {
-        if let Some(tx) = self.local_channels.get(channel) {
-            let (_, rx) = mpsc::unbounded::<String>();
-            // Note: We can't easily add a new receiver to the existing sender
-            // In a real implementation, we'd use broadcast channel or similar
-            Ok(WasmBroadcastChannelSubscriber { rx })
-        } else {
-            Err(JsValue::from_str("Channel not found"))
-        }
     }
 }

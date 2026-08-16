@@ -8,16 +8,14 @@ use wasm_bindgen::prelude::*;
 // Re-export core types
 pub use redis_wasm_core::{RedisWasmDb, DbError, Value, ValueType, WalEntry, wal::writer::WalWriterTrait};
 
-mod api;
 mod expiry;
 mod persistence;
 mod pubsub;
 mod serialization;
 
-pub use api::{RedisClient, RedisDb};
-pub use expiry::{start_expiry_cleaner, WasmDbWithExpiry};
+pub use expiry::start_expiry_cleaner;
 pub use persistence::{IndexedDbWal, WasmWalWriter};
-pub use pubsub::{WasmBroadcastChannel, WasmBroadcastChannelSubscriber, WasmPubSubManager, start_pubsub_listener};
+pub use pubsub::{WasmPubSub, WasmSubscriber};
 
 /// Helper trait to convert DbError to JsValue
 pub trait ToJsValue<T> {
@@ -44,6 +42,13 @@ pub struct WasmDb {
     inner: RedisWasmDb,
 }
 
+impl WasmDb {
+    /// Shared-state handle to the underlying database
+    pub(crate) fn inner(&self) -> &RedisWasmDb {
+        &self.inner
+    }
+}
+
 #[wasm_bindgen]
 impl WasmDb {
     /// Create a new in-memory database
@@ -59,7 +64,7 @@ impl WasmDb {
     /// persisted state.
     #[wasm_bindgen(js_name = "withPersistence")]
     pub async fn with_persistence(db_name: &str) -> Result<WasmDb, JsValue> {
-        let wal = IndexedDbWal::new(db_name).await?;
+        let wal = IndexedDbWal::open(db_name).await?;
         let entries = wal
             .replay_entries()
             .await
@@ -247,13 +252,18 @@ impl WasmDb {
     #[wasm_bindgen(js_name = "zadd")]
     pub async fn zadd(&self, key: &str, members: Vec<JsValue>) -> Result<usize, JsValue> {
         // members is [member1, score1, member2, score2, ...]
+        if members.len() % 2 != 0 {
+            return Err(JsValue::from_str("zadd expects [member, score, ...] pairs"));
+        }
         let mut parsed = Vec::new();
         for chunk in members.chunks(2) {
-            if chunk.len() == 2 {
-                let member = chunk[0].as_string().unwrap_or_default();
-                let score = chunk[1].as_f64().unwrap_or(0.0);
-                parsed.push((member, score));
-            }
+            let member = chunk[0]
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("zadd member must be a string"))?;
+            let score = chunk[1]
+                .as_f64()
+                .ok_or_else(|| JsValue::from_str("zadd score must be a number"))?;
+            parsed.push((member, score));
         }
         Ok(self.inner.zadd(key, &parsed).await.to_js_value()?)
     }
@@ -381,14 +391,14 @@ impl WasmDb {
         Ok(self.inner.persist(key).await.to_js_value()?)
     }
 
-    // Pub/Sub commands
-    #[wasm_bindgen(js_name = "publish")]
-    pub fn publish(&self, channel: &str, message: &str) -> Result<usize, JsValue> {
-        Ok(self.inner.pubsub().publish(channel, message.to_string()))
-    }
+    // Pub/Sub: use WasmPubSub — the in-process pubsub on RedisWasmDb only
+    // functions on the native build; browsers use BroadcastChannel instead.
 
-    // Note: subscribe returns a stream - needs special handling in JS
-    // We'll provide a different API for that
+    /// Start the background expiry cleaner (runs until the page unloads)
+    #[wasm_bindgen(js_name = "startExpiryCleaner")]
+    pub fn start_expiry_cleaner(&self) -> Result<(), JsValue> {
+        crate::expiry::start_expiry_cleaner(self)
+    }
 
     // Persistence commands
     #[wasm_bindgen(js_name = "save")]
@@ -446,12 +456,6 @@ impl WasmDb {
     #[wasm_bindgen(js_name = "getHash")]
     pub fn get_hash(&self, key: &str) -> WasmHash {
         WasmHash { db: self.inner.clone(), key: key.to_string() }
-    }
-
-    /// Get channel
-    #[wasm_bindgen(js_name = "getChannel")]
-    pub fn get_channel(&self, name: &str) -> WasmChannel {
-        WasmChannel { db: self.inner.clone(), name: name.to_string() }
     }
 }
 
@@ -553,7 +557,6 @@ impl WasmSet {
 
     #[wasm_bindgen(js_name = "intersection")]
     pub fn intersection(&self, other: &WasmSet) -> Result<Vec<String>, JsValue> {
-        let other_members = other.db.smembers(&other.key).to_js_value()?;
         Ok(self.db.sinter(&[&self.key, &other.key]).to_js_value()?)
     }
 
@@ -682,22 +685,4 @@ impl WasmHash {
     pub fn size(&self) -> Result<usize, JsValue> {
         Ok(self.db.hlen(&self.key).to_js_value()?)
     }
-}
-
-/// Channel wrapper for idiomatic JS API
-#[wasm_bindgen]
-pub struct WasmChannel {
-    db: RedisWasmDb,
-    name: String,
-}
-
-#[wasm_bindgen]
-impl WasmChannel {
-    #[wasm_bindgen(js_name = "publish")]
-    pub fn publish(&self, message: &str) -> Result<usize, JsValue> {
-        Ok(self.db.pubsub().publish(&self.name, message.to_string()))
-    }
-
-    // Note: subscribe would return an async iterator - complex in WASM
-    // We'll handle this via a different mechanism
 }

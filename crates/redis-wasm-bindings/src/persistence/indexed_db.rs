@@ -22,8 +22,7 @@ pub struct IndexedDbWal {
 #[wasm_bindgen]
 impl IndexedDbWal {
     /// Open (or create) the WAL database
-    #[wasm_bindgen(constructor)]
-    pub async fn new(db_name: &str) -> Result<IndexedDbWal, JsValue> {
+    pub async fn open(db_name: &str) -> Result<IndexedDbWal, JsValue> {
         let store_name = "wal_entries".to_string();
         let db = Self::open_database(db_name, &store_name).await?;
 
@@ -155,7 +154,7 @@ pub struct WasmWalWriter {
 impl WasmWalWriter {
     /// Open the WAL for `db_name` and start the background writer task
     pub async fn new(db_name: &str) -> Result<Self, WalError> {
-        let wal = IndexedDbWal::new(db_name)
+        let wal = IndexedDbWal::open(db_name)
             .await
             .map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
         Ok(Self::from_wal(wal))
