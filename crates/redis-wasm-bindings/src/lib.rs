@@ -54,11 +54,30 @@ impl WasmDb {
         }
     }
 
-    /// Create a new database with IndexedDB persistence
+    /// Create a new database with IndexedDB persistence. Any WAL entries from
+    /// previous sessions are replayed so the database starts with its
+    /// persisted state.
     #[wasm_bindgen(js_name = "withPersistence")]
     pub async fn with_persistence(db_name: &str) -> Result<WasmDb, JsValue> {
-        let wal = WasmWalWriter::new(db_name).await.map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let db = RedisWasmDb::with_wal(std::sync::Arc::new(wal));
+        let wal = IndexedDbWal::new(db_name).await?;
+        let entries = wal
+            .replay_entries()
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let writer = WasmWalWriter::from_wal(wal);
+        let db = RedisWasmDb::with_wal(std::sync::Arc::new(writer));
+
+        if !entries.is_empty() {
+            // Replay bypasses the WAL, so entries are not re-appended.
+            let replayer = redis_wasm_core::wal::WalReplayer::new(std::sync::Arc::new(db.clone()));
+            let mut reader = redis_wasm_core::wal::VecWalReader::new(entries);
+            replayer
+                .replay(&mut reader)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+
         Ok(WasmDb { inner: db })
     }
 

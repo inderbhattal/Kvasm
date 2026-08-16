@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 redis-wasm-core = { path = "../redis-wasm-core" }
 wasm-bindgen = { workspace = true }
 js-sys = { workspace = true }
-web-sys = { workspace = true, features = ["Window", "BroadcastChannel"] }
+web-sys = { workspace = true, features = ["Window", "BroadcastChannel", "console"] }
 wasm-bindgen-futures = { workspace = true }
 indexed-db = { workspace = true }
 console_error_panic_hook = { workspace = true }
@@ -23,7 +23,6 @@ bincode = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
-crossbeam = "0.8"
 futures = "0.3"
 
 [features]

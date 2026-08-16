@@ -1,38 +1,58 @@
 //! IndexedDB WAL implementation for WASM
 
 use crate::serialization::js_value::{js_value_to_wal_entry, wal_entry_to_js_value};
+use futures::channel::{mpsc, oneshot};
+use futures::StreamExt;
 use indexed_db::{Database, Factory, Transaction};
 use redis_wasm_core::wal::log::{WalEntry, WalError};
 use redis_wasm_core::wal::writer::WalWriterTrait;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::{spawn_local, JsFuture};
-use std::rc::Rc;
-use std::cell::RefCell;
-use crossbeam::channel;
+use wasm_bindgen_futures::spawn_local;
 
-/// WASM-compatible WAL writer using IndexedDB
+/// WASM WAL storage backed by an IndexedDB object store.
+///
+/// Entries are stored as JSON strings under auto-increment keys, so
+/// `get_all` returns them in append order.
 #[wasm_bindgen]
 pub struct IndexedDbWal {
-    db_name: String,
     store_name: String,
-    db: Option<Database>,
+    db: Database,
 }
 
 #[wasm_bindgen]
 impl IndexedDbWal {
-    /// Create a new IndexedDB WAL writer
+    /// Open (or create) the WAL database
     #[wasm_bindgen(constructor)]
     pub async fn new(db_name: &str) -> Result<IndexedDbWal, JsValue> {
         let store_name = "wal_entries".to_string();
         let db = Self::open_database(db_name, &store_name).await?;
 
-        Ok(IndexedDbWal {
-            db_name: db_name.to_string(),
-            store_name,
-            db: Some(db),
-        })
+        Ok(IndexedDbWal { store_name, db })
     }
 
+    /// Flush any pending writes (no-op: every append commits its own transaction)
+    pub async fn flush(&self) -> Result<(), JsValue> {
+        Ok(())
+    }
+
+    /// Clear all WAL entries
+    pub async fn clear(&self) -> Result<(), JsValue> {
+        let store_name = self.store_name.clone();
+        self.db
+            .transaction(&[&store_name])
+            .rw()
+            .run(move |tx: Transaction<JsValue>| async move {
+                tx.object_store(&store_name)?.clear().await?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        Ok(())
+    }
+}
+
+impl IndexedDbWal {
     /// Open or create the IndexedDB database
     async fn open_database(db_name: &str, store_name: &str) -> Result<Database, JsValue> {
         let factory = Factory::get().map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
@@ -52,7 +72,7 @@ impl IndexedDbWal {
                 .open(db_name, version, move |event: indexed_db::VersionChangeEvent<JsValue>| {
                     let store_name = store_name_owned.clone();
                     async move {
-                        event.build_object_store(&store_name).create()?;
+                        event.build_object_store(&store_name).auto_increment().create()?;
                         Ok(())
                     }
                 })
@@ -64,171 +84,137 @@ impl IndexedDbWal {
         Ok(database)
     }
 
-    /// Append a WAL entry to IndexedDB (JS API - takes JsValue)
-    pub async fn append(&self, entry: &JsValue) -> Result<(), JsValue> {
-        let db = self.db.as_ref().ok_or_else(|| JsValue::from_str("Database not initialized"))?;
-
+    /// Append a WAL entry under a fresh auto-increment key
+    async fn append_entry(&self, entry: &WalEntry) -> Result<(), WalError> {
+        let js_entry = wal_entry_to_js_value(entry)
+            .map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
         let store_name = self.store_name.clone();
-        let entry_clone = entry.clone();
 
-        let transaction = db
+        self.db
             .transaction(&[&store_name])
-            .rw();
-
-        transaction
-            .run(move |tx: Transaction<JsValue>| {
-                let store_name = store_name.clone();
-                let entry_clone = entry_clone.clone();
-                async move {
-                    let store = tx.object_store(&store_name)?;
-                    let key = js_sys::Date::now();
-                    store.put_kv(&entry_clone, &JsValue::from_f64(key)).await?;
-                    Ok(())
-                }
-            })
-            .await
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-        Ok(())
-    }
-
-    /// Flush any pending writes (no-op for IndexedDB as writes are immediate)
-    pub async fn flush(&self) -> Result<(), JsValue> {
-        Ok(())
-    }
-
-    /// Replay WAL entries to restore database state
-    /// Note: This returns the entries for the caller to apply
-    pub async fn replay(&self) -> Result<Vec<JsValue>, JsValue> {
-        let db_ref = self.db.as_ref().ok_or_else(|| JsValue::from_str("Database not initialized"))?;
-
-        let store_name = self.store_name.clone();
-        let entries = db_ref
-            .transaction(&[&store_name])
-            .run(move |tx: Transaction<JsValue>| {
-                let store_name = store_name.clone();
-                async move {
-                    let store = tx.object_store(&store_name)?;
-                    let entries: Vec<JsValue> = store.get_all(None).await?;
-                    Ok(entries)
-                }
-            })
-            .await
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-        Ok(entries)
-    }
-
-    /// Clear all WAL entries
-    pub async fn clear(&self) -> Result<(), JsValue> {
-        let db = self.db.as_ref().ok_or_else(|| JsValue::from_str("Database not initialized"))?;
-
-        let store_name = self.store_name.clone();
-        db.transaction(&[&store_name])
             .rw()
-            .run(move |tx: Transaction<JsValue>| {
-                let store_name = store_name.clone();
-                async move {
-                    let store = tx.object_store(&store_name)?;
-                    store.clear().await?;
-                    Ok(())
-                }
-            })
-            .await
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-        Ok(())
-    }
-}
-
-/// Convert WalEntry to JsValue for storage
-async fn wal_entry_to_js_value_inner(entry: &WalEntry) -> Result<JsValue, WalError> {
-    let json = serde_json::to_string(entry).map_err(|e| WalError::Serialization(bincode::Error::new(bincode::ErrorKind::Custom(format!("{}", e)))))?;
-    Ok(JsValue::from_str(&json))
-}
-
-/// Background task state - holds the IndexedDbWal
-struct WalBackgroundTask {
-    wal: IndexedDbWal,
-}
-
-impl WalBackgroundTask {
-    /// Create a new background task
-    fn new(wal: IndexedDbWal) -> Self {
-        Self { wal }
-    }
-
-    /// Run the background task - processes entries from the receiver
-    async fn run(mut self, receiver: channel::Receiver<WalEntry>) {
-        while let Ok(entry) = receiver.recv() {
-            if let Err(e) = Self::write_entry(&self.wal, &entry).await {
-                tracing::error!("Failed to write WAL entry: {:?}", e);
-            }
-        }
-    }
-
-    /// Write a single entry to IndexedDB
-    async fn write_entry(wal: &IndexedDbWal, entry: &WalEntry) -> Result<(), WalError> {
-        let db = wal.db.as_ref().ok_or_else(|| WalError::IndexedDb("Database not initialized".to_string()))?;
-
-        let store_name = wal.store_name.clone();
-        let js_entry = wal_entry_to_js_value_inner(entry).await?;
-
-        db.transaction(&[&store_name])
-            .rw()
-            .run(move |tx: Transaction<JsValue>| {
-                let store_name = store_name.clone();
-                let js_entry = js_entry.clone();
-                async move {
-                    let store = tx.object_store(&store_name)?;
-                    store.put(&js_entry).await?;
-                    Ok(())
-                }
+            .run(move |tx: Transaction<JsValue>| async move {
+                tx.object_store(&store_name)?.add(&js_entry).await?;
+                Ok(())
             })
             .await
             .map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
 
         Ok(())
     }
+
+    /// Read all stored entries in append order
+    pub async fn replay_entries(&self) -> Result<Vec<WalEntry>, WalError> {
+        let store_name = self.store_name.clone();
+        let raw = self.db
+            .transaction(&[&store_name])
+            .run(move |tx: Transaction<JsValue>| async move {
+                let entries: Vec<JsValue> = tx.object_store(&store_name)?.get_all(None).await?;
+                Ok(entries)
+            })
+            .await
+            .map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
+
+        raw.iter()
+            .map(|v| js_value_to_wal_entry(v).map_err(|e| WalError::IndexedDb(format!("{:?}", e))))
+            .collect()
+    }
+
+    /// Count stored entries
+    async fn count_entries(&self) -> Result<u64, WalError> {
+        let store_name = self.store_name.clone();
+        let count = self.db
+            .transaction(&[&store_name])
+            .run(move |tx: Transaction<JsValue>| async move {
+                let count = tx.object_store(&store_name)?.count().await?;
+                Ok(count)
+            })
+            .await
+            .map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
+        Ok(count as u64)
+    }
 }
 
-/// WASM-compatible WAL writer that implements WalWriterTrait
-/// Uses a channel to send entries to a background task running on the main thread
+/// Commands processed by the background writer task, in order.
+enum WalCommand {
+    Append(WalEntry),
+    /// Acked only after every previously queued append has been written.
+    Flush(oneshot::Sender<()>),
+    Count(oneshot::Sender<Result<u64, WalError>>),
+}
+
+/// `WalWriterTrait` adapter for [`IndexedDbWal`].
+///
+/// IndexedDB handles are not `Send`, but the trait requires it, so writes are
+/// queued to a background task on the JS event loop. `flush` round-trips a
+/// command through that queue, guaranteeing all prior appends are durable.
 pub struct WasmWalWriter {
-    sender: channel::Sender<WalEntry>,
+    sender: mpsc::UnboundedSender<WalCommand>,
 }
 
 impl WasmWalWriter {
-    /// Create a new WASM WAL writer
+    /// Open the WAL for `db_name` and start the background writer task
     pub async fn new(db_name: &str) -> Result<Self, WalError> {
-        let wal = IndexedDbWal::new(db_name).await.map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
+        let wal = IndexedDbWal::new(db_name)
+            .await
+            .map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
+        Ok(Self::from_wal(wal))
+    }
 
-        let (sender, receiver) = channel::unbounded::<WalEntry>();
+    /// Start the background writer task over an already-open WAL
+    pub fn from_wal(wal: IndexedDbWal) -> Self {
+        let (sender, mut receiver) = mpsc::unbounded::<WalCommand>();
 
-        // Spawn background task on main thread to process WAL entries
-        let task = WalBackgroundTask::new(wal);
         spawn_local(async move {
-            task.run(receiver).await;
+            while let Some(cmd) = receiver.next().await {
+                match cmd {
+                    WalCommand::Append(entry) => {
+                        if let Err(e) = wal.append_entry(&entry).await {
+                            web_sys::console::error_1(&JsValue::from_str(&format!(
+                                "redis-wasm: WAL write failed: {}",
+                                e
+                            )));
+                        }
+                    }
+                    WalCommand::Flush(ack) => {
+                        let _ = ack.send(());
+                    }
+                    WalCommand::Count(reply) => {
+                        let _ = reply.send(wal.count_entries().await);
+                    }
+                }
+            }
         });
 
-        Ok(Self { sender })
+        Self { sender }
     }
 }
 
 #[async_trait::async_trait]
 impl WalWriterTrait for WasmWalWriter {
     async fn append(&self, entry: &WalEntry) -> Result<(), WalError> {
-        self.sender.send(entry.clone()).map_err(|_| WalError::IndexedDb("Channel closed".to_string()))?;
-        Ok(())
+        self.sender
+            .unbounded_send(WalCommand::Append(entry.clone()))
+            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))
     }
 
     async fn flush(&self) -> Result<(), WalError> {
-        // Writes are async, nothing to flush
-        Ok(())
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.sender
+            .unbounded_send(WalCommand::Flush(ack_tx))
+            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))?;
+        ack_rx
+            .await
+            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))
     }
 
     async fn size(&self) -> Result<u64, WalError> {
-        // Can't easily get size from background task, return 0
-        Ok(0)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender
+            .unbounded_send(WalCommand::Count(reply_tx))
+            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))?
     }
 }
