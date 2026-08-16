@@ -11,7 +11,7 @@ edition = "2021"
 license = "MIT"
 authors = ["Redis WASM Contributors"]
 description = "Redis-like in-memory database for browsers via WebAssembly"
-repository = "https://github.com/yourorg/redis-wasm"
+repository = "https://github.com/inderbhattal/Kvasm"
 
 [workspace.dependencies]
 # Core
