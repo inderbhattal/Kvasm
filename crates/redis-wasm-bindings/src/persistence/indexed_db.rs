@@ -63,6 +63,10 @@ impl IndexedDbWal {
         // Create object store if it doesn't exist
         if !database.object_store_names().contains(&store_name.to_string()) {
             let version = database.version() + 1;
+            // The upgrade open below blocks until every other connection to
+            // this database closes — including the probe connection above,
+            // which nothing else would ever close. Close it or deadlock.
+            database.close();
             let factory2 = Factory::get().map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
             let store_name_owned = store_name.to_string();
             // Return the newly-opened database (which has the object store),
@@ -119,6 +123,33 @@ impl IndexedDbWal {
             .collect()
     }
 
+    /// Atomically replace all stored entries with `entries` (compaction).
+    /// Clear + re-add run in one readwrite transaction, so a crash can never
+    /// leave a half-rewritten log.
+    async fn rewrite_entries(&self, entries: &[WalEntry]) -> Result<(), WalError> {
+        let js_entries: Vec<JsValue> = entries
+            .iter()
+            .map(|e| wal_entry_to_js_value(e).map_err(|err| WalError::IndexedDb(format!("{:?}", err))))
+            .collect::<Result<_, _>>()?;
+        let store_name = self.store_name.clone();
+
+        self.db
+            .transaction(&[&store_name])
+            .rw()
+            .run(move |tx: Transaction<JsValue>| async move {
+                let store = tx.object_store(&store_name)?;
+                store.clear().await?;
+                for entry in &js_entries {
+                    store.add(entry).await?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
+
+        Ok(())
+    }
+
     /// Count stored entries
     async fn count_entries(&self) -> Result<u64, WalError> {
         let store_name = self.store_name.clone();
@@ -137,16 +168,21 @@ impl IndexedDbWal {
 /// Commands processed by the background writer task, in order.
 enum WalCommand {
     Append(WalEntry),
-    /// Acked only after every previously queued append has been written.
-    Flush(oneshot::Sender<()>),
+    /// Acked only after every previously queued append has been attempted;
+    /// errors if any append since the last successful rewrite failed.
+    Flush(oneshot::Sender<Result<(), WalError>>),
     Count(oneshot::Sender<Result<u64, WalError>>),
+    /// Replace the whole log with these entries (compaction)
+    Rewrite(Vec<WalEntry>, oneshot::Sender<Result<(), WalError>>),
 }
 
 /// `WalWriterTrait` adapter for [`IndexedDbWal`].
 ///
 /// IndexedDB handles are not `Send`, but the trait requires it, so writes are
 /// queued to a background task on the JS event loop. `flush` round-trips a
-/// command through that queue, guaranteeing all prior appends are durable.
+/// command through that queue: it resolves once all prior appends have been
+/// attempted, and errors if any of them failed (the failure is sticky until
+/// a successful compaction rewrite makes the log whole again).
 pub struct WasmWalWriter {
     sender: mpsc::UnboundedSender<WalCommand>,
 }
@@ -165,6 +201,10 @@ impl WasmWalWriter {
         let (sender, mut receiver) = mpsc::unbounded::<WalCommand>();
 
         spawn_local(async move {
+            // First append failure since the last successful rewrite. Sticky:
+            // once an entry is lost the log stays incomplete until a rewrite
+            // replaces it wholesale, so flushes keep reporting the failure.
+            let mut append_error: Option<String> = None;
             while let Some(cmd) = receiver.next().await {
                 match cmd {
                     WalCommand::Append(entry) => {
@@ -173,13 +213,29 @@ impl WasmWalWriter {
                                 "redis-wasm: WAL write failed: {}",
                                 e
                             )));
+                            append_error.get_or_insert_with(|| e.to_string());
                         }
                     }
                     WalCommand::Flush(ack) => {
-                        let _ = ack.send(());
+                        let result = match &append_error {
+                            None => Ok(()),
+                            Some(msg) => Err(WalError::IndexedDb(format!(
+                                "a WAL append failed; the log is incomplete until \
+                                 a compaction rewrites it: {msg}"
+                            ))),
+                        };
+                        let _ = ack.send(result);
                     }
                     WalCommand::Count(reply) => {
                         let _ = reply.send(wal.count_entries().await);
+                    }
+                    WalCommand::Rewrite(entries, reply) => {
+                        let result = wal.rewrite_entries(&entries).await;
+                        if result.is_ok() {
+                            // The snapshot supersedes any lost appends.
+                            append_error = None;
+                        }
+                        let _ = reply.send(result);
                     }
                 }
             }
@@ -204,13 +260,25 @@ impl WalWriterTrait for WasmWalWriter {
             .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))?;
         ack_rx
             .await
-            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))
+            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))?
     }
 
     async fn size(&self) -> Result<u64, WalError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
             .unbounded_send(WalCommand::Count(reply_tx))
+            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))?
+    }
+
+    async fn rewrite(&self, entries: &[WalEntry]) -> Result<(), WalError> {
+        // Queued behind pending appends, so the rewrite lands on a log that
+        // reflects everything enqueued before the snapshot was taken.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender
+            .unbounded_send(WalCommand::Rewrite(entries.to_vec(), reply_tx))
             .map_err(|_| WalError::IndexedDb("WAL writer task stopped".to_string()))?;
         reply_rx
             .await

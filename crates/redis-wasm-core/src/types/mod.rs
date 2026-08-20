@@ -98,10 +98,13 @@ impl ValueType {
     }
 }
 
-/// Main value enum representing all Redis data types
+/// Main value enum representing all Redis data types.
+///
+/// Strings are binary-safe byte sequences, like Redis strings. Callers that
+/// need text decode them (typically as UTF-8) at the API boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
-    String(String),
+    String(Vec<u8>),
     List(VecDeque<String>),
     Set(HashSet<String>),
     SortedSet(SortedSet),
@@ -149,19 +152,19 @@ impl Value {
 
     /// Create a new empty string value (for or_insert_with)
     pub fn new_empty_string() -> Self {
-        Value::String(String::new())
+        Value::String(Vec::new())
     }
 
-    /// Try to get as string
-    pub fn as_string(&self) -> Option<&String> {
+    /// Try to get as string bytes
+    pub fn as_bytes(&self) -> Option<&Vec<u8>> {
         match self {
             Value::String(s) => Some(s),
             _ => None,
         }
     }
 
-    /// Try to get as mutable string
-    pub fn as_string_mut(&mut self) -> Option<&mut String> {
+    /// Try to get as mutable string bytes
+    pub fn as_bytes_mut(&mut self) -> Option<&mut Vec<u8>> {
         match self {
             Value::String(s) => Some(s),
             _ => None,
@@ -235,7 +238,7 @@ impl Value {
 
 impl Default for Value {
     fn default() -> Self {
-        Value::String(String::new())
+        Value::String(Vec::new())
     }
 }
 
@@ -243,55 +246,65 @@ impl Default for Value {
 // String Operations
 // ============================================================================
 
+/// Maximum string value size in bytes (Redis' default proto-max-bulk-len)
+pub const MAX_STRING_SIZE: usize = 512 * 1024 * 1024;
+
 impl Value {
-    /// Create a new string value
-    pub fn new_string(s: String) -> Self {
-        Value::String(s)
+    /// Create a new string value from anything byte-like
+    pub fn new_string(s: impl Into<Vec<u8>>) -> Self {
+        Value::String(s.into())
     }
 
     /// Create a new string value from str
     pub fn new_string_str(s: &str) -> Self {
-        Value::String(s.to_string())
+        Value::String(s.as_bytes().to_vec())
     }
 
-    /// Append to string value (returns new length)
-    pub fn append(&mut self, suffix: &str) -> Result<usize, TypeError> {
-        let s = self.as_string_mut().ok_or(TypeError::WrongType)?;
-        s.push_str(suffix);
+    /// Append bytes to string value (returns new byte length)
+    pub fn append(&mut self, suffix: &[u8]) -> Result<usize, TypeError> {
+        let s = self.as_bytes_mut().ok_or(TypeError::WrongType)?;
+        s.len()
+            .checked_add(suffix.len())
+            .filter(|&len| len <= MAX_STRING_SIZE)
+            .ok_or(TypeError::StringTooLarge)?;
+        s.extend_from_slice(suffix);
         Ok(s.len())
     }
 
-    /// Get substring (start, end inclusive like Redis)
-    pub fn get_range(&self, start: isize, end: isize) -> Result<String, TypeError> {
-        let s = self.as_string().ok_or(TypeError::WrongType)?;
-        let Some((start, end)) = Self::clamp_range(s.chars().count(), start, end) else {
-            return Ok(String::new());
+    /// Get byte range (start, end inclusive like Redis GETRANGE)
+    pub fn get_range(&self, start: isize, end: isize) -> Result<Vec<u8>, TypeError> {
+        let s = self.as_bytes().ok_or(TypeError::WrongType)?;
+        let Some((start, end)) = Self::clamp_range(s.len(), start, end) else {
+            return Ok(Vec::new());
         };
-        Ok(s.chars().skip(start).take(end - start).collect())
+        Ok(s[start..end].to_vec())
     }
 
-    /// Set range (overwrite substring)
-    pub fn set_range(&mut self, offset: usize, value: &str) -> Result<usize, TypeError> {
-        let s = self.as_string_mut().ok_or(TypeError::WrongType)?;
-        let chars: Vec<char> = value.chars().collect();
-        let mut s_chars: Vec<char> = s.chars().collect();
-
-        // Extend if necessary
-        if offset + chars.len() > s_chars.len() {
-            s_chars.resize(offset + chars.len(), '\0');
+    /// Overwrite bytes at a byte offset, zero-padding any gap
+    /// (Redis SETRANGE). Returns the new byte length.
+    pub fn set_range(&mut self, offset: usize, value: &[u8]) -> Result<usize, TypeError> {
+        let s = self.as_bytes_mut().ok_or(TypeError::WrongType)?;
+        // Redis: an empty value never modifies or extends the string.
+        if value.is_empty() {
+            return Ok(s.len());
         }
 
-        for (i, c) in chars.into_iter().enumerate() {
-            s_chars[offset + i] = c;
+        // Checked, capped arithmetic: a hostile offset must error like Redis,
+        // not wrap (32-bit wasm) or attempt a multi-GB allocation.
+        let end = offset
+            .checked_add(value.len())
+            .filter(|&end| end <= MAX_STRING_SIZE)
+            .ok_or(TypeError::StringTooLarge)?;
+        if end > s.len() {
+            s.resize(end, 0);
         }
-
-        *s = s_chars.into_iter().collect();
+        s[offset..end].copy_from_slice(value);
         Ok(s.len())
     }
 
-    /// Get string length
+    /// Get string length in bytes (Redis STRLEN)
     pub fn str_len(&self) -> Result<usize, TypeError> {
-        self.as_string().map(|s| s.len()).ok_or(TypeError::WrongType)
+        self.as_bytes().map(|s| s.len()).ok_or(TypeError::WrongType)
     }
 }
 
@@ -711,6 +724,8 @@ pub enum TypeError {
     WrongType,
     #[error("ERR index out of range")]
     IndexOutOfRange,
+    #[error("ERR string exceeds maximum allowed size (proto-max-bulk-len)")]
+    StringTooLarge,
 }
 
 #[cfg(test)]
@@ -806,9 +821,28 @@ mod tests {
 
     #[test]
     fn test_get_range_out_of_range() {
-        let v = Value::new_string("a".to_string());
-        assert_eq!(v.get_range(5, 10).unwrap(), "");
-        assert_eq!(v.get_range(0, 0).unwrap(), "a");
-        assert_eq!(v.get_range(0, -1).unwrap(), "a");
+        let v = Value::new_string("a");
+        assert_eq!(v.get_range(5, 10).unwrap(), b"");
+        assert_eq!(v.get_range(0, 0).unwrap(), b"a");
+        assert_eq!(v.get_range(0, -1).unwrap(), b"a");
+    }
+
+    #[test]
+    fn test_string_ops_are_byte_oriented() {
+        // "é" is 2 bytes in UTF-8, so byte-oriented ops see length 6.
+        let mut v = Value::new_string("héllo");
+        assert_eq!(v.str_len().unwrap(), 6);
+        assert_eq!(v.get_range(1, 2).unwrap(), "é".as_bytes());
+        assert_eq!(v.append(b"!").unwrap(), 7);
+
+        // SETRANGE zero-pads the gap like Redis.
+        let mut v = Value::new_string("ab");
+        assert_eq!(v.set_range(4, b"cd").unwrap(), 6);
+        assert_eq!(v.as_bytes().unwrap(), b"ab\0\0cd");
+
+        // An empty value never extends the string.
+        let mut v = Value::new_string("ab");
+        assert_eq!(v.set_range(10, b"").unwrap(), 2);
+        assert_eq!(v.as_bytes().unwrap(), b"ab");
     }
 }

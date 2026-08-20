@@ -15,6 +15,11 @@ pub trait WalWriterTrait: Send + Sync {
 
     /// Get the current WAL size in bytes
     async fn size(&self) -> Result<u64, WalError>;
+
+    /// Atomically replace the whole log with `entries` (compaction).
+    /// Any buffered-but-unwritten entries are discarded — the caller's
+    /// snapshot already reflects them.
+    async fn rewrite(&self, entries: &[WalEntry]) -> Result<(), WalError>;
 }
 
 /// Native file-based WAL writer (for server-side use)
@@ -87,6 +92,28 @@ pub mod native {
             let metadata = std::fs::metadata(&self.path)?;
             Ok(metadata.len())
         }
+
+        async fn rewrite(&self, entries: &[WalEntry]) -> Result<(), WalError> {
+            // Lock order matches append/flush (buffer, then writer).
+            let mut buffer = self.buffer.lock().await;
+            let mut writer = self.writer.lock().await;
+            buffer.clear();
+
+            let file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&self.path)?;
+            let mut new_writer = BufWriter::new(file);
+            for e in entries {
+                let bytes = e.encode()?;
+                new_writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
+                new_writer.write_all(&bytes)?;
+            }
+            new_writer.flush()?;
+            *writer = new_writer;
+            Ok(())
+        }
     }
 }
 
@@ -101,7 +128,7 @@ mod tests {
     async fn test_wal_entry_encoding() {
         let entry = WalEntry::Set {
             key: "test".to_string(),
-            value: "hello".to_string(),
+            value: b"hello".to_vec(),
             expiry: None,
         };
 
@@ -111,7 +138,7 @@ mod tests {
         match decoded {
             WalEntry::Set { key, value, expiry } => {
                 assert_eq!(key, "test");
-                assert_eq!(value, "hello");
+                assert_eq!(value, b"hello");
                 assert_eq!(expiry, None);
             }
             _ => panic!("Wrong entry type"),

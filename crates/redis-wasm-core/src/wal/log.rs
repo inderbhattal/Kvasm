@@ -8,7 +8,11 @@ use thiserror::Error;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalEntry {
     // String operations
-    Set { key: String, value: String, expiry: Option<u64> },
+    //
+    // `value` is the raw string bytes (Redis strings are binary-safe). In
+    // bincode this encodes identically to the old `String` field, so native
+    // WAL files written before the change still replay.
+    Set { key: String, value: Vec<u8>, expiry: Option<u64> },
     Del { keys: Vec<String> },
     Expire { key: String, expiry_ms: u64 },
 

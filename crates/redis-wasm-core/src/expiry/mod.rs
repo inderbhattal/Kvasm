@@ -20,16 +20,19 @@ impl ExpiryManager {
         }
     }
 
-    /// Set expiry in seconds from now
+    /// Set expiry in seconds from now (saturating, so absurd durations mean
+    /// "never" rather than wrapping into the past)
     pub fn set_expiry(&self, key: &str, seconds: u64) {
         let now_ms = current_time_ms();
-        self.expiries.insert(key.to_string(), now_ms + seconds * 1000);
+        self.expiries
+            .insert(key.to_string(), now_ms.saturating_add(seconds.saturating_mul(1000)));
     }
 
-    /// Set expiry in milliseconds from now
+    /// Set expiry in milliseconds from now (saturating)
     pub fn set_expiry_ms(&self, key: &str, milliseconds: u64) {
         let now_ms = current_time_ms();
-        self.expiries.insert(key.to_string(), now_ms + milliseconds);
+        self.expiries
+            .insert(key.to_string(), now_ms.saturating_add(milliseconds));
     }
 
     /// Set absolute expiry timestamp (milliseconds since epoch)
@@ -82,7 +85,14 @@ impl ExpiryManager {
         self.expiries.remove(key).is_some()
     }
 
-    /// Clean up expired keys (call periodically)
+    /// Clean up expired keys (call periodically).
+    ///
+    /// The callback runs while the expiry entry is still present, and the
+    /// entry is then removed only if it still holds the expired timestamp —
+    /// so a concurrent SET/EXPIRE that replaced or cleared the TTL wins over
+    /// a stale cleanup decision. Callers that delete data in the callback
+    /// should re-check the TTL under their own lock (see
+    /// `RedisWasmDb::remove_key_if_expired`).
     pub fn cleanup_expired<F>(&self, mut callback: F)
     where
         F: FnMut(&str),
@@ -97,8 +107,8 @@ impl ExpiryManager {
         }
 
         for key in expired_keys {
-            self.expiries.remove(&key);
             callback(&key);
+            self.expiries.remove_if(&key, |_, expiry_ms| *expiry_ms <= now_ms);
         }
     }
 
@@ -185,7 +195,7 @@ impl ExpiryCleaner {
             while *running.read() {
                 interval.tick().await;
                 manager.cleanup_expired(|key| {
-                    db.remove_key(key);
+                    db.remove_key_if_expired(key);
                 });
             }
         });
