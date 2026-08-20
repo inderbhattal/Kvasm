@@ -61,7 +61,10 @@ impl IndexedDbWal {
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         // Create object store if it doesn't exist
-        if !database.object_store_names().contains(&store_name.to_string()) {
+        if !database
+            .object_store_names()
+            .contains(&store_name.to_string())
+        {
             let version = database.version() + 1;
             // The upgrade open below blocks until every other connection to
             // this database closes — including the probe connection above,
@@ -72,13 +75,20 @@ impl IndexedDbWal {
             // Return the newly-opened database (which has the object store),
             // not the pre-store handle opened above.
             return factory2
-                .open(db_name, version, move |event: indexed_db::VersionChangeEvent<JsValue>| {
-                    let store_name = store_name_owned.clone();
-                    async move {
-                        event.build_object_store(&store_name).auto_increment().create()?;
-                        Ok(())
-                    }
-                })
+                .open(
+                    db_name,
+                    version,
+                    move |event: indexed_db::VersionChangeEvent<JsValue>| {
+                        let store_name = store_name_owned.clone();
+                        async move {
+                            event
+                                .build_object_store(&store_name)
+                                .auto_increment()
+                                .create()?;
+                            Ok(())
+                        }
+                    },
+                )
                 .await
                 .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
                 .map(|db| db.into_manual_close());
@@ -94,7 +104,9 @@ impl IndexedDbWal {
     async fn append_batch(&self, entries: &[WalEntry]) -> Result<(), WalError> {
         let js_entries: Vec<JsValue> = entries
             .iter()
-            .map(|e| wal_entry_to_js_value(e).map_err(|err| WalError::IndexedDb(format!("{:?}", err))))
+            .map(|e| {
+                wal_entry_to_js_value(e).map_err(|err| WalError::IndexedDb(format!("{:?}", err)))
+            })
             .collect::<Result<_, _>>()?;
         let store_name = self.store_name.clone();
 
@@ -117,7 +129,8 @@ impl IndexedDbWal {
     /// Read all stored entries in append order
     pub async fn replay_entries(&self) -> Result<Vec<WalEntry>, WalError> {
         let store_name = self.store_name.clone();
-        let raw = self.db
+        let raw = self
+            .db
             .transaction(&[&store_name])
             .run(move |tx: Transaction<JsValue>| async move {
                 let entries: Vec<JsValue> = tx.object_store(&store_name)?.get_all(None).await?;
@@ -137,7 +150,9 @@ impl IndexedDbWal {
     async fn rewrite_entries(&self, entries: &[WalEntry]) -> Result<(), WalError> {
         let js_entries: Vec<JsValue> = entries
             .iter()
-            .map(|e| wal_entry_to_js_value(e).map_err(|err| WalError::IndexedDb(format!("{:?}", err))))
+            .map(|e| {
+                wal_entry_to_js_value(e).map_err(|err| WalError::IndexedDb(format!("{:?}", err)))
+            })
             .collect::<Result<_, _>>()?;
         let store_name = self.store_name.clone();
 
@@ -161,7 +176,8 @@ impl IndexedDbWal {
     /// Count stored entries
     async fn count_entries(&self) -> Result<u64, WalError> {
         let store_name = self.store_name.clone();
-        let count = self.db
+        let count = self
+            .db
             .transaction(&[&store_name])
             .run(move |tx: Transaction<JsValue>| async move {
                 let count = tx.object_store(&store_name)?.count().await?;

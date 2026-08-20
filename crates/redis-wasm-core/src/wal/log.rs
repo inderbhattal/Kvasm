@@ -1,7 +1,7 @@
 //! WAL entry definitions and serialization
 
-use serde::{Deserialize, Serialize};
 use bincode;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// WAL entry types for all mutating operations
@@ -12,33 +12,87 @@ pub enum WalEntry {
     // `value` is the raw string bytes (Redis strings are binary-safe). In
     // bincode this encodes identically to the old `String` field, so native
     // WAL files written before the change still replay.
-    Set { key: String, value: Vec<u8>, expiry: Option<u64> },
-    Del { keys: Vec<String> },
-    Expire { key: String, expiry_ms: u64 },
+    Set {
+        key: String,
+        value: Vec<u8>,
+        expiry: Option<u64>,
+    },
+    Del {
+        keys: Vec<String>,
+    },
+    Expire {
+        key: String,
+        expiry_ms: u64,
+    },
 
     // List operations
-    LPush { key: String, values: Vec<String> },
-    RPush { key: String, values: Vec<String> },
-    LPop { key: String, count: usize },
-    RPop { key: String, count: usize },
-    LSet { key: String, index: isize, value: String },
-    LRem { key: String, count: isize, value: String },
-    LTrim { key: String, start: isize, stop: isize },
+    LPush {
+        key: String,
+        values: Vec<String>,
+    },
+    RPush {
+        key: String,
+        values: Vec<String>,
+    },
+    LPop {
+        key: String,
+        count: usize,
+    },
+    RPop {
+        key: String,
+        count: usize,
+    },
+    LSet {
+        key: String,
+        index: isize,
+        value: String,
+    },
+    LRem {
+        key: String,
+        count: isize,
+        value: String,
+    },
+    LTrim {
+        key: String,
+        start: isize,
+        stop: isize,
+    },
 
     // Set operations
-    SAdd { key: String, members: Vec<String> },
-    SRem { key: String, members: Vec<String> },
+    SAdd {
+        key: String,
+        members: Vec<String>,
+    },
+    SRem {
+        key: String,
+        members: Vec<String>,
+    },
 
     // Sorted set operations
-    ZAdd { key: String, members: Vec<(String, f64)> },
-    ZRem { key: String, members: Vec<String> },
+    ZAdd {
+        key: String,
+        members: Vec<(String, f64)>,
+    },
+    ZRem {
+        key: String,
+        members: Vec<String>,
+    },
 
     // Hash operations
-    HSet { key: String, field: String, value: String },
-    HDel { key: String, fields: Vec<String> },
+    HSet {
+        key: String,
+        field: String,
+        value: String,
+    },
+    HDel {
+        key: String,
+        fields: Vec<String>,
+    },
 
     // Expiry operations
-    Persist { key: String },
+    Persist {
+        key: String,
+    },
 }
 
 impl WalEntry {

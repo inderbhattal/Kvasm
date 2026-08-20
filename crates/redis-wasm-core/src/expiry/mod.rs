@@ -1,7 +1,7 @@
 //! Expiry/TTL management
 
-use std::sync::Arc;
 use dashmap::DashMap;
+use std::sync::Arc;
 
 /// Expiry manager for handling key TTLs.
 ///
@@ -24,8 +24,10 @@ impl ExpiryManager {
     /// "never" rather than wrapping into the past)
     pub fn set_expiry(&self, key: &str, seconds: u64) {
         let now_ms = current_time_ms();
-        self.expiries
-            .insert(key.to_string(), now_ms.saturating_add(seconds.saturating_mul(1000)));
+        self.expiries.insert(
+            key.to_string(),
+            now_ms.saturating_add(seconds.saturating_mul(1000)),
+        );
     }
 
     /// Set expiry in milliseconds from now (saturating)
@@ -108,13 +110,17 @@ impl ExpiryManager {
 
         for key in expired_keys {
             callback(&key);
-            self.expiries.remove_if(&key, |_, expiry_ms| *expiry_ms <= now_ms);
+            self.expiries
+                .remove_if(&key, |_, expiry_ms| *expiry_ms <= now_ms);
         }
     }
 
     /// Get all expiring keys with their expiry times (for persistence)
     pub fn get_all_expiries(&self) -> Vec<(String, u64)> {
-        self.expiries.iter().map(|e| (e.key().clone(), *e.value())).collect()
+        self.expiries
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect()
     }
 
     /// Get count of keys with expiry

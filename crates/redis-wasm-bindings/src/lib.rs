@@ -6,7 +6,9 @@
 use wasm_bindgen::prelude::*;
 
 // Re-export core types
-pub use redis_wasm_core::{RedisWasmDb, DbError, Value, ValueType, WalEntry, wal::writer::WalWriterTrait};
+pub use redis_wasm_core::{
+    wal::writer::WalWriterTrait, DbError, RedisWasmDb, Value, ValueType, WalEntry,
+};
 
 mod expiry;
 mod persistence;
@@ -56,7 +58,9 @@ fn safe_integer(delta: f64) -> Result<i64, JsValue> {
     if delta.fract() == 0.0 && delta.abs() <= MAX_SAFE {
         Ok(delta as i64)
     } else {
-        Err(JsValue::from_str("ERR value is not an integer or out of range"))
+        Err(JsValue::from_str(
+            "ERR value is not an integer or out of range",
+        ))
     }
 }
 
@@ -140,7 +144,12 @@ impl WasmDb {
 
     /// SET key to raw bytes [EX seconds]
     #[wasm_bindgen(js_name = "setBuffer")]
-    pub async fn set_buffer(&self, key: &str, value: Vec<u8>, ex: Option<u32>) -> Result<(), JsValue> {
+    pub async fn set_buffer(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        ex: Option<u32>,
+    ) -> Result<(), JsValue> {
         self.db().set(key, value).await.to_js_value()?;
         if let Some(seconds) = ex {
             self.db().expire(key, seconds as u64).await.to_js_value()?;
@@ -190,20 +199,31 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = "append")]
     pub async fn append(&self, key: &str, value: &str) -> Result<usize, JsValue> {
-        Ok(self.db().append(key, value.as_bytes()).await.to_js_value()?)
+        Ok(self
+            .db()
+            .append(key, value.as_bytes())
+            .await
+            .to_js_value()?)
     }
 
     /// GETRANGE key start end (byte offsets, inclusive). Decoded as UTF-8,
     /// lossily if the range splits a multi-byte character.
     #[wasm_bindgen(js_name = "getrange")]
     pub fn getrange(&self, key: &str, start: i32, end: i32) -> Result<String, JsValue> {
-        let bytes = self.db().getrange(key, start as isize, end as isize).to_js_value()?;
+        let bytes = self
+            .db()
+            .getrange(key, start as isize, end as isize)
+            .to_js_value()?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     #[wasm_bindgen(js_name = "setrange")]
     pub async fn setrange(&self, key: &str, offset: u32, value: &str) -> Result<usize, JsValue> {
-        Ok(self.db().setrange(key, offset as usize, value.as_bytes()).await.to_js_value()?)
+        Ok(self
+            .db()
+            .setrange(key, offset as usize, value.as_bytes())
+            .await
+            .to_js_value()?)
     }
 
     // Counter commands. Results come back as JS numbers, so counters beyond
@@ -226,15 +246,19 @@ impl WasmDb {
     /// INCRBY key delta (delta must be a safe integer)
     #[wasm_bindgen(js_name = "incrby")]
     pub async fn incrby(&self, key: &str, delta: f64) -> Result<f64, JsValue> {
-        Ok(self.db().incr_by(key, safe_integer(delta)?).await.to_js_value()? as f64)
+        Ok(self
+            .db()
+            .incr_by(key, safe_integer(delta)?)
+            .await
+            .to_js_value()? as f64)
     }
 
     /// DECRBY key delta (delta must be a safe integer)
     #[wasm_bindgen(js_name = "decrby")]
     pub async fn decrby(&self, key: &str, delta: f64) -> Result<f64, JsValue> {
-        let delta = safe_integer(delta)?.checked_neg().ok_or_else(|| {
-            JsValue::from_str("ERR value is not an integer or out of range")
-        })?;
+        let delta = safe_integer(delta)?
+            .checked_neg()
+            .ok_or_else(|| JsValue::from_str("ERR value is not an integer or out of range"))?;
         Ok(self.db().incr_by(key, delta).await.to_js_value()? as f64)
     }
 
@@ -257,17 +281,28 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = "lpop")]
     pub async fn lpop(&self, key: &str, count: Option<u32>) -> Result<Vec<String>, JsValue> {
-        Ok(self.db().lpop(key, count.unwrap_or(1) as usize).await.to_js_value()?)
+        Ok(self
+            .db()
+            .lpop(key, count.unwrap_or(1) as usize)
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "rpop")]
     pub async fn rpop(&self, key: &str, count: Option<u32>) -> Result<Vec<String>, JsValue> {
-        Ok(self.db().rpop(key, count.unwrap_or(1) as usize).await.to_js_value()?)
+        Ok(self
+            .db()
+            .rpop(key, count.unwrap_or(1) as usize)
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "lrange")]
     pub fn lrange(&self, key: &str, start: i32, stop: i32) -> Result<Vec<String>, JsValue> {
-        Ok(self.db().lrange(key, start as isize, stop as isize).to_js_value()?)
+        Ok(self
+            .db()
+            .lrange(key, start as isize, stop as isize)
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "llen")]
@@ -282,17 +317,29 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = "lset")]
     pub async fn lset(&self, key: &str, index: i32, value: &str) -> Result<(), JsValue> {
-        Ok(self.db().lset(key, index as isize, value.to_string()).await.to_js_value()?)
+        Ok(self
+            .db()
+            .lset(key, index as isize, value.to_string())
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "lrem")]
     pub async fn lrem(&self, key: &str, count: i32, value: &str) -> Result<usize, JsValue> {
-        Ok(self.db().lrem(key, count as isize, value).await.to_js_value()?)
+        Ok(self
+            .db()
+            .lrem(key, count as isize, value)
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "ltrim")]
     pub async fn ltrim(&self, key: &str, start: i32, stop: i32) -> Result<(), JsValue> {
-        Ok(self.db().ltrim(key, start as isize, stop as isize).await.to_js_value()?)
+        Ok(self
+            .db()
+            .ltrim(key, start as isize, stop as isize)
+            .await
+            .to_js_value()?)
     }
 
     // Set commands
@@ -380,13 +427,41 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = "zrange")]
-    pub fn zrange(&self, key: &str, start: i32, stop: i32, with_scores: Option<bool>) -> Result<Vec<String>, JsValue> {
-        Ok(self.db().zrange(key, start as isize, stop as isize, with_scores.unwrap_or(false)).to_js_value()?)
+    pub fn zrange(
+        &self,
+        key: &str,
+        start: i32,
+        stop: i32,
+        with_scores: Option<bool>,
+    ) -> Result<Vec<String>, JsValue> {
+        Ok(self
+            .db()
+            .zrange(
+                key,
+                start as isize,
+                stop as isize,
+                with_scores.unwrap_or(false),
+            )
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "zrevrange")]
-    pub fn zrevrange(&self, key: &str, start: i32, stop: i32, with_scores: Option<bool>) -> Result<Vec<String>, JsValue> {
-        Ok(self.db().zrevrange(key, start as isize, stop as isize, with_scores.unwrap_or(false)).to_js_value()?)
+    pub fn zrevrange(
+        &self,
+        key: &str,
+        start: i32,
+        stop: i32,
+        with_scores: Option<bool>,
+    ) -> Result<Vec<String>, JsValue> {
+        Ok(self
+            .db()
+            .zrevrange(
+                key,
+                start as isize,
+                stop as isize,
+                with_scores.unwrap_or(false),
+            )
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "zrangebyscore")]
@@ -413,7 +488,11 @@ impl WasmDb {
     // Hash commands
     #[wasm_bindgen(js_name = "hset")]
     pub async fn hset(&self, key: &str, field: &str, value: &str) -> Result<usize, JsValue> {
-        Ok(self.db().hset(key, field.to_string(), value.to_string()).await.to_js_value()?)
+        Ok(self
+            .db()
+            .hset(key, field.to_string(), value.to_string())
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "hget")]
@@ -464,7 +543,11 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = "pexpire")]
     pub async fn pexpire(&self, key: &str, milliseconds: u32) -> Result<bool, JsValue> {
-        Ok(self.db().pexpire(key, milliseconds as u64).await.to_js_value()?)
+        Ok(self
+            .db()
+            .pexpire(key, milliseconds as u64)
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "ttl")]
@@ -532,7 +615,12 @@ impl WasmDb {
     }
 
     /// Set a value (Map-like)
-    pub async fn set_value(&self, key: &str, value: &str, ttl_ms: Option<u32>) -> Result<(), JsValue> {
+    pub async fn set_value(
+        &self,
+        key: &str,
+        value: &str,
+        ttl_ms: Option<u32>,
+    ) -> Result<(), JsValue> {
         self.db().set(key, value).await.to_js_value()?;
         if let Some(ms) = ttl_ms {
             self.db().pexpire(key, ms as u64).await.to_js_value()?;
@@ -553,25 +641,37 @@ impl WasmDb {
     /// Get typed list
     #[wasm_bindgen(js_name = "getList")]
     pub fn get_list(&self, key: &str) -> WasmList {
-        WasmList { db: self.db().clone(), key: key.to_string() }
+        WasmList {
+            db: self.db().clone(),
+            key: key.to_string(),
+        }
     }
 
     /// Get typed set
     #[wasm_bindgen(js_name = "getSet")]
     pub fn get_set(&self, key: &str) -> WasmSet {
-        WasmSet { db: self.db().clone(), key: key.to_string() }
+        WasmSet {
+            db: self.db().clone(),
+            key: key.to_string(),
+        }
     }
 
     /// Get typed sorted set
     #[wasm_bindgen(js_name = "getSortedSet")]
     pub fn get_sorted_set(&self, key: &str) -> WasmSortedSet {
-        WasmSortedSet { db: self.db().clone(), key: key.to_string() }
+        WasmSortedSet {
+            db: self.db().clone(),
+            key: key.to_string(),
+        }
     }
 
     /// Get typed hash
     #[wasm_bindgen(js_name = "getHash")]
     pub fn get_hash(&self, key: &str) -> WasmHash {
-        WasmHash { db: self.db().clone(), key: key.to_string() }
+        WasmHash {
+            db: self.db().clone(),
+            key: key.to_string(),
+        }
     }
 }
 
@@ -627,12 +727,19 @@ impl WasmList {
 
     #[wasm_bindgen(js_name = "set")]
     pub async fn set(&self, index: i32, value: &str) -> Result<(), JsValue> {
-        Ok(self.db().lset(&self.key, index as isize, value.to_string()).await.to_js_value()?)
+        Ok(self
+            .db()
+            .lset(&self.key, index as isize, value.to_string())
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "range")]
     pub fn range(&self, start: i32, end: i32) -> Result<Vec<String>, JsValue> {
-        Ok(self.db().lrange(&self.key, start as isize, end as isize).to_js_value()?)
+        Ok(self
+            .db()
+            .lrange(&self.key, start as isize, end as isize)
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(getter)]
@@ -642,12 +749,20 @@ impl WasmList {
 
     #[wasm_bindgen(js_name = "remove")]
     pub async fn remove(&self, value: &str, count: Option<i32>) -> Result<usize, JsValue> {
-        Ok(self.db().lrem(&self.key, count.unwrap_or(0) as isize, value).await.to_js_value()?)
+        Ok(self
+            .db()
+            .lrem(&self.key, count.unwrap_or(0) as isize, value)
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "trim")]
     pub async fn trim(&self, start: i32, end: i32) -> Result<(), JsValue> {
-        Ok(self.db().ltrim(&self.key, start as isize, end as isize).await.to_js_value()?)
+        Ok(self
+            .db()
+            .ltrim(&self.key, start as isize, end as isize)
+            .await
+            .to_js_value()?)
     }
 }
 
@@ -716,7 +831,11 @@ clock_synced_db!(WasmSortedSet);
 impl WasmSortedSet {
     #[wasm_bindgen(js_name = "add")]
     pub async fn add(&self, member: &str, score: f64) -> Result<usize, JsValue> {
-        Ok(self.db().zadd(&self.key, &[(member.to_string(), score)]).await.to_js_value()?)
+        Ok(self
+            .db()
+            .zadd(&self.key, &[(member.to_string(), score)])
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "remove")]
@@ -735,13 +854,39 @@ impl WasmSortedSet {
     }
 
     #[wasm_bindgen(js_name = "range")]
-    pub fn range(&self, start: i32, stop: i32, with_scores: Option<bool>) -> Result<Vec<String>, JsValue> {
-        Ok(self.db().zrange(&self.key, start as isize, stop as isize, with_scores.unwrap_or(false)).to_js_value()?)
+    pub fn range(
+        &self,
+        start: i32,
+        stop: i32,
+        with_scores: Option<bool>,
+    ) -> Result<Vec<String>, JsValue> {
+        Ok(self
+            .db()
+            .zrange(
+                &self.key,
+                start as isize,
+                stop as isize,
+                with_scores.unwrap_or(false),
+            )
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "revRange")]
-    pub fn rev_range(&self, start: i32, stop: i32, with_scores: Option<bool>) -> Result<Vec<String>, JsValue> {
-        Ok(self.db().zrevrange(&self.key, start as isize, stop as isize, with_scores.unwrap_or(false)).to_js_value()?)
+    pub fn rev_range(
+        &self,
+        start: i32,
+        stop: i32,
+        with_scores: Option<bool>,
+    ) -> Result<Vec<String>, JsValue> {
+        Ok(self
+            .db()
+            .zrevrange(
+                &self.key,
+                start as isize,
+                stop as isize,
+                with_scores.unwrap_or(false),
+            )
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "rangeByScore")]
@@ -779,7 +924,11 @@ clock_synced_db!(WasmHash);
 impl WasmHash {
     #[wasm_bindgen(js_name = "set")]
     pub async fn set(&self, field: &str, value: &str) -> Result<usize, JsValue> {
-        Ok(self.db().hset(&self.key, field.to_string(), value.to_string()).await.to_js_value()?)
+        Ok(self
+            .db()
+            .hset(&self.key, field.to_string(), value.to_string())
+            .await
+            .to_js_value()?)
     }
 
     #[wasm_bindgen(js_name = "get")]

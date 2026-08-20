@@ -15,7 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --check
       - name: Core tests (default features)
         run: cargo test -p redis-wasm-core
       - name: Core tests (native feature)

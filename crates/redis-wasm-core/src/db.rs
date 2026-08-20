@@ -1,12 +1,12 @@
 //! Main database structure and core operations
 
+use crate::expiry::ExpiryManager;
+use crate::pubsub::PubSubManager;
+use crate::types::{TypeError, Value, ValueType};
+use crate::wal::{WalEntry, WalWriter};
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use dashmap::DashMap;
-use crate::types::{Value, ValueType, TypeError};
-use crate::expiry::ExpiryManager;
-use crate::wal::{WalWriter, WalEntry};
-use crate::pubsub::PubSubManager;
 use thiserror::Error;
 
 /// Database errors
@@ -160,7 +160,8 @@ impl RedisWasmDb {
     /// Auto-compact the WAL once it holds this many entries; 0 disables
     /// auto-compaction (manual [`compact`](Self::compact) still works)
     pub fn set_compaction_threshold(&self, threshold: u64) {
-        self.compaction_threshold.store(threshold, Ordering::Relaxed);
+        self.compaction_threshold
+            .store(threshold, Ordering::Relaxed);
     }
 
     /// Compact the WAL if auto-compaction is enabled and worthwhile: the log
@@ -300,7 +301,8 @@ impl RedisWasmDb {
         let value = value.into();
         // SET clears any existing TTL (Redis semantics)
         self.expiry.remove(key);
-        self.data.insert(key.to_string(), Value::new_string(value.clone()));
+        self.data
+            .insert(key.to_string(), Value::new_string(value.clone()));
         let entry = WalEntry::Set {
             key: key.to_string(),
             value,
@@ -331,7 +333,8 @@ impl RedisWasmDb {
 
         match self.data.get(key) {
             None => Ok(None),
-            Some(v) => v.as_bytes()
+            Some(v) => v
+                .as_bytes()
                 .cloned()
                 .map(Some)
                 .ok_or(DbError::WrongType(TypeError::WrongType)),
@@ -384,7 +387,9 @@ impl RedisWasmDb {
             return Ok(ValueType::None);
         }
 
-        Ok(self.data.get(key)
+        Ok(self
+            .data
+            .get(key)
             .map(|v| v.value_type())
             .unwrap_or(ValueType::None))
     }
@@ -430,7 +435,10 @@ impl RedisWasmDb {
 
         // Scoped so the map guard drops before the WAL await below.
         let (new_len, wal_entry) = {
-            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_empty_string);
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_empty_string);
             let new_len = entry.append(value)?;
             let wal_entry = WalEntry::Set {
                 key: key.to_string(),
@@ -471,7 +479,10 @@ impl RedisWasmDb {
         }
 
         let (new_len, wal_entry) = {
-            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_empty_string);
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_empty_string);
             let new_len = entry.set_range(offset, value)?;
             let wal_entry = WalEntry::Set {
                 key: key.to_string(),
@@ -592,13 +603,17 @@ impl RedisWasmDb {
         }
 
         let new_len = {
-            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_list);
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_list);
             entry.lpush(values)?
         };
         self.write_wal(&WalEntry::LPush {
             key: key.to_string(),
             values: values.to_vec(),
-        }).await?;
+        })
+        .await?;
 
         Ok(new_len)
     }
@@ -617,13 +632,17 @@ impl RedisWasmDb {
         }
 
         let new_len = {
-            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_list);
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_list);
             entry.rpush(values)?
         };
         self.write_wal(&WalEntry::RPush {
             key: key.to_string(),
             values: values.to_vec(),
-        }).await?;
+        })
+        .await?;
 
         Ok(new_len)
     }
@@ -643,7 +662,8 @@ impl RedisWasmDb {
             self.write_wal(&WalEntry::LPop {
                 key: key.to_string(),
                 count,
-            }).await?;
+            })
+            .await?;
         }
 
         Ok(result)
@@ -664,7 +684,8 @@ impl RedisWasmDb {
             self.write_wal(&WalEntry::RPop {
                 key: key.to_string(),
                 count,
-            }).await?;
+            })
+            .await?;
         }
 
         Ok(result)
@@ -677,7 +698,8 @@ impl RedisWasmDb {
             return Ok(Vec::new());
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .lrange(start, stop)
             .map_err(DbError::WrongType)
@@ -690,7 +712,8 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .llen()
             .map_err(DbError::WrongType)
@@ -703,7 +726,8 @@ impl RedisWasmDb {
             return Ok(None);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .lindex(index)
             .map_err(DbError::WrongType)
@@ -716,7 +740,8 @@ impl RedisWasmDb {
             return Err(DbError::KeyNotFound);
         }
 
-        self.data.get_mut(key)
+        self.data
+            .get_mut(key)
             .ok_or(DbError::KeyNotFound)?
             .lset(index, value.clone())?;
 
@@ -724,7 +749,8 @@ impl RedisWasmDb {
             key: key.to_string(),
             index,
             value,
-        }).await?;
+        })
+        .await?;
 
         Ok(())
     }
@@ -736,7 +762,9 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        let removed = self.data.get_mut(key)
+        let removed = self
+            .data
+            .get_mut(key)
             .ok_or(DbError::KeyNotFound)?
             .lrem(count, value)?;
 
@@ -745,7 +773,8 @@ impl RedisWasmDb {
                 key: key.to_string(),
                 count,
                 value: value.to_string(),
-            }).await?;
+            })
+            .await?;
         }
 
         Ok(removed)
@@ -758,7 +787,8 @@ impl RedisWasmDb {
             return Ok(());
         }
 
-        self.data.get_mut(key)
+        self.data
+            .get_mut(key)
             .ok_or(DbError::KeyNotFound)?
             .ltrim(start, stop)?;
 
@@ -766,7 +796,8 @@ impl RedisWasmDb {
             key: key.to_string(),
             start,
             stop,
-        }).await?;
+        })
+        .await?;
 
         Ok(())
     }
@@ -792,14 +823,18 @@ impl RedisWasmDb {
         }
 
         let added = {
-            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_set);
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_set);
             entry.sadd(members)?
         };
         if added > 0 {
             self.write_wal(&WalEntry::SAdd {
                 key: key.to_string(),
                 members: members.to_vec(),
-            }).await?;
+            })
+            .await?;
         }
 
         Ok(added)
@@ -820,7 +855,8 @@ impl RedisWasmDb {
             self.write_wal(&WalEntry::SRem {
                 key: key.to_string(),
                 members: members.to_vec(),
-            }).await?;
+            })
+            .await?;
         }
 
         Ok(removed)
@@ -833,7 +869,8 @@ impl RedisWasmDb {
             return Ok(false);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .sismember(member)
             .map_err(DbError::WrongType)
@@ -846,7 +883,8 @@ impl RedisWasmDb {
             return Ok(Vec::new());
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .smembers()
             .map_err(DbError::WrongType)
@@ -859,7 +897,8 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .scard()
             .map_err(DbError::WrongType)
@@ -896,7 +935,9 @@ impl RedisWasmDb {
 
             match self.data.get(*key) {
                 Some(entry) => {
-                    let other = entry.as_set().ok_or_else(|| DbError::WrongType(TypeError::WrongType))?;
+                    let other = entry
+                        .as_set()
+                        .ok_or_else(|| DbError::WrongType(TypeError::WrongType))?;
                     result.retain(|v| other.contains(v));
                 }
                 None => {
@@ -920,7 +961,9 @@ impl RedisWasmDb {
             }
 
             if let Some(entry) = self.data.get(*key) {
-                let set = entry.as_set().ok_or_else(|| DbError::WrongType(TypeError::WrongType))?;
+                let set = entry
+                    .as_set()
+                    .ok_or_else(|| DbError::WrongType(TypeError::WrongType))?;
                 result.extend(set.iter().cloned());
             }
         }
@@ -950,7 +993,9 @@ impl RedisWasmDb {
             }
 
             if let Some(entry) = self.data.get(*other_key) {
-                let other = entry.as_set().ok_or_else(|| DbError::WrongType(TypeError::WrongType))?;
+                let other = entry
+                    .as_set()
+                    .ok_or_else(|| DbError::WrongType(TypeError::WrongType))?;
                 for v in other {
                     result.remove(v);
                 }
@@ -981,7 +1026,10 @@ impl RedisWasmDb {
         }
 
         let added = {
-            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_sorted_set);
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_sorted_set);
             entry.zadd(members)?
         };
         // Always persist: ZADD may update the score of an existing member
@@ -989,7 +1037,8 @@ impl RedisWasmDb {
         self.write_wal(&WalEntry::ZAdd {
             key: key.to_string(),
             members: members.to_vec(),
-        }).await?;
+        })
+        .await?;
 
         Ok(added)
     }
@@ -1009,7 +1058,8 @@ impl RedisWasmDb {
             self.write_wal(&WalEntry::ZRem {
                 key: key.to_string(),
                 members: members.to_vec(),
-            }).await?;
+            })
+            .await?;
         }
 
         Ok(removed)
@@ -1022,7 +1072,8 @@ impl RedisWasmDb {
             return Ok(None);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .zscore(member)
             .map_err(DbError::WrongType)
@@ -1035,7 +1086,8 @@ impl RedisWasmDb {
             return Ok(None);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .zrank(member)
             .map_err(DbError::WrongType)
@@ -1048,46 +1100,67 @@ impl RedisWasmDb {
             return Ok(None);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .zrevrank(member)
             .map_err(DbError::WrongType)
     }
 
     /// Get range by index (ZRANGE)
-    pub fn zrange(&self, key: &str, start: isize, stop: isize, with_scores: bool) -> Result<Vec<String>, DbError> {
+    pub fn zrange(
+        &self,
+        key: &str,
+        start: isize,
+        stop: isize,
+        with_scores: bool,
+    ) -> Result<Vec<String>, DbError> {
         if self.expiry.is_expired(key) {
             self.del(&[key])?;
             return Ok(Vec::new());
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .zrange(start, stop, with_scores)
             .map_err(DbError::WrongType)
     }
 
     /// Get reverse range by index (ZREVRANGE)
-    pub fn zrevrange(&self, key: &str, start: isize, stop: isize, with_scores: bool) -> Result<Vec<String>, DbError> {
+    pub fn zrevrange(
+        &self,
+        key: &str,
+        start: isize,
+        stop: isize,
+        with_scores: bool,
+    ) -> Result<Vec<String>, DbError> {
         if self.expiry.is_expired(key) {
             self.del(&[key])?;
             return Ok(Vec::new());
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .zrevrange(start, stop, with_scores)
             .map_err(DbError::WrongType)
     }
 
     /// Get range by score (ZRANGEBYSCORE)
-    pub fn zrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<Vec<(String, f64)>, DbError> {
+    pub fn zrangebyscore(
+        &self,
+        key: &str,
+        min: f64,
+        max: f64,
+    ) -> Result<Vec<(String, f64)>, DbError> {
         if self.expiry.is_expired(key) {
             self.del(&[key])?;
             return Ok(Vec::new());
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .zrangebyscore(min, max)
             .map_err(DbError::WrongType)
@@ -1100,7 +1173,8 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .zcard()
             .map_err(DbError::WrongType)
@@ -1113,7 +1187,8 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .zcount(min, max)
             .map_err(DbError::WrongType)
@@ -1130,14 +1205,18 @@ impl RedisWasmDb {
         }
 
         let result = {
-            let mut entry = self.data.entry(key.to_string()).or_insert_with(Value::new_hash);
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_hash);
             entry.hset(field.clone(), value.clone())?
         };
         self.write_wal(&WalEntry::HSet {
             key: key.to_string(),
             field,
             value,
-        }).await?;
+        })
+        .await?;
 
         Ok(result)
     }
@@ -1149,7 +1228,8 @@ impl RedisWasmDb {
             return Ok(None);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .hget(field)
             .map_err(DbError::WrongType)
@@ -1162,7 +1242,8 @@ impl RedisWasmDb {
             return Ok(Vec::new());
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .hgetall()
             .map_err(DbError::WrongType)
@@ -1183,7 +1264,8 @@ impl RedisWasmDb {
             self.write_wal(&WalEntry::HDel {
                 key: key.to_string(),
                 fields: fields.to_vec(),
-            }).await?;
+            })
+            .await?;
         }
 
         Ok(deleted)
@@ -1196,7 +1278,8 @@ impl RedisWasmDb {
             return Ok(false);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .hexists(field)
             .map_err(DbError::WrongType)
@@ -1209,7 +1292,8 @@ impl RedisWasmDb {
             return Ok(0);
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .hlen()
             .map_err(DbError::WrongType)
@@ -1222,7 +1306,8 @@ impl RedisWasmDb {
             return Ok(Vec::new());
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .hkeys()
             .map_err(DbError::WrongType)
@@ -1235,7 +1320,8 @@ impl RedisWasmDb {
             return Ok(Vec::new());
         }
 
-        self.data.get(key)
+        self.data
+            .get(key)
             .ok_or(DbError::KeyNotFound)?
             .hvals()
             .map_err(DbError::WrongType)

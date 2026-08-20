@@ -11,11 +11,14 @@ pub fn wal_entry_to_js_value(entry: &WalEntry) -> Result<JsValue, JsValue> {
 
 /// Convert a stored JS value (JSON string) back to a WAL entry
 pub fn js_value_to_wal_entry(value: &JsValue) -> Result<WalEntry, JsValue> {
-    let json = value.as_string().ok_or_else(|| JsValue::from_str("Expected string"))?;
+    let json = value
+        .as_string()
+        .ok_or_else(|| JsValue::from_str("Expected string"))?;
     match serde_json::from_str(&json) {
         Ok(entry) => Ok(entry),
-        Err(err) => upgrade_legacy_set_entry(&json)
-            .ok_or_else(|| JsValue::from_str(&err.to_string())),
+        Err(err) => {
+            upgrade_legacy_set_entry(&json).ok_or_else(|| JsValue::from_str(&err.to_string()))
+        }
     }
 }
 

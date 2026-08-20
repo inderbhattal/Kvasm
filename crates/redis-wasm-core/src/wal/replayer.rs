@@ -29,7 +29,9 @@ impl WalReplayer {
     async fn apply_entry(&self, entry: &WalEntry) -> Result<(), WalError> {
         match entry {
             WalEntry::Set { key, value, expiry } => {
-                self.db.data_for_replay().insert(key.clone(), crate::types::Value::new_string(value.clone()));
+                self.db
+                    .data_for_replay()
+                    .insert(key.clone(), crate::types::Value::new_string(value.clone()));
                 // SET clears any prior TTL; re-apply only if one was recorded.
                 self.db.expiry_for_replay().remove(key);
                 if let Some(expiry_ms) = expiry {
@@ -46,63 +48,109 @@ impl WalReplayer {
                 self.db.expiry_for_replay().set_expiry_at(key, *expiry_ms);
             }
             WalEntry::LPush { key, values } => {
-                let mut entry = self.db.data_for_replay().entry(key.clone()).or_insert_with(crate::types::Value::new_list);
-                entry.lpush(values).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                let mut entry = self
+                    .db
+                    .data_for_replay()
+                    .entry(key.clone())
+                    .or_insert_with(crate::types::Value::new_list);
+                entry
+                    .lpush(values)
+                    .map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             }
             WalEntry::RPush { key, values } => {
-                let mut entry = self.db.data_for_replay().entry(key.clone()).or_insert_with(crate::types::Value::new_list);
-                entry.rpush(values).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                let mut entry = self
+                    .db
+                    .data_for_replay()
+                    .entry(key.clone())
+                    .or_insert_with(crate::types::Value::new_list);
+                entry
+                    .rpush(values)
+                    .map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             }
             WalEntry::LPop { key, count } => {
                 if let Some(mut entry) = self.db.data_for_replay().get_mut(key) {
-                    entry.lpop(*count).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    entry.lpop(*count).map_err(|e| {
+                        WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
                 }
             }
             WalEntry::RPop { key, count } => {
                 if let Some(mut entry) = self.db.data_for_replay().get_mut(key) {
-                    entry.rpop(*count).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    entry.rpop(*count).map_err(|e| {
+                        WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
                 }
             }
             WalEntry::LSet { key, index, value } => {
                 if let Some(mut entry) = self.db.data_for_replay().get_mut(key) {
-                    entry.lset(*index, value.clone()).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    entry.lset(*index, value.clone()).map_err(|e| {
+                        WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
                 }
             }
             WalEntry::LRem { key, count, value } => {
                 if let Some(mut entry) = self.db.data_for_replay().get_mut(key) {
-                    entry.lrem(*count, value).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    entry.lrem(*count, value).map_err(|e| {
+                        WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
                 }
             }
             WalEntry::LTrim { key, start, stop } => {
                 if let Some(mut entry) = self.db.data_for_replay().get_mut(key) {
-                    entry.ltrim(*start, *stop).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    entry.ltrim(*start, *stop).map_err(|e| {
+                        WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
                 }
             }
             WalEntry::SAdd { key, members } => {
-                let mut entry = self.db.data_for_replay().entry(key.clone()).or_insert_with(crate::types::Value::new_set);
-                entry.sadd(members).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                let mut entry = self
+                    .db
+                    .data_for_replay()
+                    .entry(key.clone())
+                    .or_insert_with(crate::types::Value::new_set);
+                entry
+                    .sadd(members)
+                    .map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             }
             WalEntry::SRem { key, members } => {
                 if let Some(mut entry) = self.db.data_for_replay().get_mut(key) {
-                    entry.srem(members).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    entry.srem(members).map_err(|e| {
+                        WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
                 }
             }
             WalEntry::ZAdd { key, members } => {
-                let mut entry = self.db.data_for_replay().entry(key.clone()).or_insert_with(crate::types::Value::new_sorted_set);
-                entry.zadd(members).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                let mut entry = self
+                    .db
+                    .data_for_replay()
+                    .entry(key.clone())
+                    .or_insert_with(crate::types::Value::new_sorted_set);
+                entry
+                    .zadd(members)
+                    .map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             }
             WalEntry::ZRem { key, members } => {
                 if let Some(mut entry) = self.db.data_for_replay().get_mut(key) {
-                    entry.zrem(members).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    entry.zrem(members).map_err(|e| {
+                        WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
                 }
             }
             WalEntry::HSet { key, field, value } => {
-                let mut entry = self.db.data_for_replay().entry(key.clone()).or_insert_with(crate::types::Value::new_hash);
-                entry.hset(field.clone(), value.clone()).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                let mut entry = self
+                    .db
+                    .data_for_replay()
+                    .entry(key.clone())
+                    .or_insert_with(crate::types::Value::new_hash);
+                entry
+                    .hset(field.clone(), value.clone())
+                    .map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             }
             WalEntry::HDel { key, fields } => {
                 if let Some(mut entry) = self.db.data_for_replay().get_mut(key) {
-                    entry.hdel(fields).map_err(|e| WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                    entry.hdel(fields).map_err(|e| {
+                        WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
                 }
             }
             WalEntry::Persist { key } => {
@@ -128,7 +176,9 @@ pub struct VecWalReader {
 
 impl VecWalReader {
     pub fn new(entries: Vec<WalEntry>) -> Self {
-        Self { entries: entries.into_iter() }
+        Self {
+            entries: entries.into_iter(),
+        }
     }
 }
 
@@ -194,9 +244,9 @@ mod tests {
         let db = Arc::new(RedisWasmDb::new());
         let replayer = WalReplayer::new(db.clone());
         let mut reader = VecWalReader::new(vec![WalEntry::LPush {
-                key: "list".into(),
-                values: vec!["a".into(), "b".into()],
-            }]);
+            key: "list".into(),
+            values: vec!["a".into(), "b".into()],
+        }]);
         replayer.replay(&mut reader).await.unwrap();
         assert_eq!(db.lrange("list", 0, -1).unwrap(), vec!["b", "a"]);
     }
@@ -207,10 +257,10 @@ mod tests {
         db.expiry_for_replay().set_expiry_at("k", 9_999_999_999_999);
         let replayer = WalReplayer::new(db.clone());
         let mut reader = VecWalReader::new(vec![WalEntry::Set {
-                key: "k".into(),
-                value: "v".into(),
-                expiry: None,
-            }]);
+            key: "k".into(),
+            value: "v".into(),
+            expiry: None,
+        }]);
         replayer.replay(&mut reader).await.unwrap();
         assert_eq!(db.get("k").unwrap(), Some("v".to_string()));
         assert_eq!(db.ttl("k").unwrap(), -1);
@@ -222,9 +272,9 @@ mod tests {
         let replayer = WalReplayer::new(db.clone());
         let ts = 1_234_567_890u64;
         let mut reader = VecWalReader::new(vec![WalEntry::Expire {
-                key: "k".into(),
-                expiry_ms: ts,
-            }]);
+            key: "k".into(),
+            expiry_ms: ts,
+        }]);
         replayer.replay(&mut reader).await.unwrap();
         // Must be stored as an absolute timestamp, not now + ts.
         assert_eq!(db.expiry_for_replay().get_expiry_ms("k"), Some(ts));

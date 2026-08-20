@@ -4,13 +4,13 @@
 //! data structures without any WASM-specific dependencies.
 
 pub mod db;
-pub mod types;
-pub mod wal;
 pub mod expiry;
 pub mod pubsub;
+pub mod types;
+pub mod wal;
 
-pub use db::{RedisWasmDb, DbError};
-pub use types::{Value, ValueType};
+pub use db::{DbError, RedisWasmDb};
 pub use expiry::ExpiryManager;
-pub use wal::{WalEntry, WalWriter, WalReplayer};
-pub use pubsub::{PubSubManager, Channel};
+pub use pubsub::{Channel, PubSubManager};
+pub use types::{Value, ValueType};
+pub use wal::{WalEntry, WalReplayer, WalWriter};

@@ -1,8 +1,8 @@
 //! Core data types for Redis-like values
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// A Redis sorted set: members ranked by (score, member), like Redis ZSETs.
 ///
@@ -497,12 +497,16 @@ impl Value {
 
     /// Check membership (SISMEMBER)
     pub fn sismember(&self, member: &str) -> Result<bool, TypeError> {
-        self.as_set().map(|s| s.contains(member)).ok_or(TypeError::WrongType)
+        self.as_set()
+            .map(|s| s.contains(member))
+            .ok_or(TypeError::WrongType)
     }
 
     /// Get all members (SMEMBERS)
     pub fn smembers(&self) -> Result<Vec<String>, TypeError> {
-        self.as_set().map(|s| s.iter().cloned().collect()).ok_or(TypeError::WrongType)
+        self.as_set()
+            .map(|s| s.iter().cloned().collect())
+            .ok_or(TypeError::WrongType)
     }
 
     /// Get cardinality (SCARD)
@@ -590,8 +594,16 @@ impl Value {
         if len == 0 {
             return None;
         }
-        let start = if start < 0 { (len + start).max(0) } else { start.min(len) };
-        let stop = if stop < 0 { (len + stop).max(-1) } else { stop.min(len - 1) };
+        let start = if start < 0 {
+            (len + start).max(0)
+        } else {
+            start.min(len)
+        };
+        let stop = if stop < 0 {
+            (len + stop).max(-1)
+        } else {
+            stop.min(len - 1)
+        };
         if start > stop || start >= len {
             return None;
         }
@@ -599,21 +611,37 @@ impl Value {
     }
 
     /// Get range by index (ZRANGE), ascending score order
-    pub fn zrange(&self, start: isize, stop: isize, with_scores: bool) -> Result<Vec<String>, TypeError> {
+    pub fn zrange(
+        &self,
+        start: isize,
+        stop: isize,
+        with_scores: bool,
+    ) -> Result<Vec<String>, TypeError> {
         let zset = self.as_sorted_set().ok_or(TypeError::WrongType)?;
         let Some((start, end)) = Self::clamp_range(zset.len(), start, stop) else {
             return Ok(Vec::new());
         };
-        Ok(collect_range(zset.iter().skip(start).take(end - start), with_scores))
+        Ok(collect_range(
+            zset.iter().skip(start).take(end - start),
+            with_scores,
+        ))
     }
 
     /// Get reverse range by index (ZREVRANGE), descending score order
-    pub fn zrevrange(&self, start: isize, stop: isize, with_scores: bool) -> Result<Vec<String>, TypeError> {
+    pub fn zrevrange(
+        &self,
+        start: isize,
+        stop: isize,
+        with_scores: bool,
+    ) -> Result<Vec<String>, TypeError> {
         let zset = self.as_sorted_set().ok_or(TypeError::WrongType)?;
         let Some((start, end)) = Self::clamp_range(zset.len(), start, stop) else {
             return Ok(Vec::new());
         };
-        Ok(collect_range(zset.iter().rev().skip(start).take(end - start), with_scores))
+        Ok(collect_range(
+            zset.iter().rev().skip(start).take(end - start),
+            with_scores,
+        ))
     }
 
     /// Get range by score (ZRANGEBYSCORE), ascending score order
@@ -628,7 +656,9 @@ impl Value {
 
     /// Get cardinality (ZCARD)
     pub fn zcard(&self) -> Result<usize, TypeError> {
-        self.as_sorted_set().map(|z| z.len()).ok_or(TypeError::WrongType)
+        self.as_sorted_set()
+            .map(|z| z.len())
+            .ok_or(TypeError::WrongType)
     }
 
     /// Count in score range (ZCOUNT)
@@ -671,7 +701,9 @@ impl Value {
 
     /// Get field (HGET)
     pub fn hget(&self, field: &str) -> Result<Option<String>, TypeError> {
-        self.as_hash().map(|h| h.get(field).cloned()).ok_or(TypeError::WrongType)
+        self.as_hash()
+            .map(|h| h.get(field).cloned())
+            .ok_or(TypeError::WrongType)
     }
 
     /// Get all fields and values (HGETALL)
@@ -695,7 +727,9 @@ impl Value {
 
     /// Check field exists (HEXISTS)
     pub fn hexists(&self, field: &str) -> Result<bool, TypeError> {
-        self.as_hash().map(|h| h.contains_key(field)).ok_or(TypeError::WrongType)
+        self.as_hash()
+            .map(|h| h.contains_key(field))
+            .ok_or(TypeError::WrongType)
     }
 
     /// Get length (HLEN)
@@ -705,12 +739,16 @@ impl Value {
 
     /// Get all keys (HKEYS)
     pub fn hkeys(&self) -> Result<Vec<String>, TypeError> {
-        self.as_hash().map(|h| h.keys().cloned().collect()).ok_or(TypeError::WrongType)
+        self.as_hash()
+            .map(|h| h.keys().cloned().collect())
+            .ok_or(TypeError::WrongType)
     }
 
     /// Get all values (HVALS)
     pub fn hvals(&self) -> Result<Vec<String>, TypeError> {
-        self.as_hash().map(|h| h.values().cloned().collect()).ok_or(TypeError::WrongType)
+        self.as_hash()
+            .map(|h| h.values().cloned().collect())
+            .ok_or(TypeError::WrongType)
     }
 }
 
@@ -735,7 +773,8 @@ mod tests {
     #[test]
     fn test_zrevrank() {
         let mut z = Value::new_sorted_set();
-        z.zadd(&[("a".into(), 1.0), ("b".into(), 2.0), ("c".into(), 3.0)]).unwrap();
+        z.zadd(&[("a".into(), 1.0), ("b".into(), 2.0), ("c".into(), 3.0)])
+            .unwrap();
         assert_eq!(z.zrank("a").unwrap(), Some(0));
         assert_eq!(z.zrank("c").unwrap(), Some(2));
         // Highest score has reverse rank 0
@@ -747,7 +786,8 @@ mod tests {
     fn test_zset_orders_by_score_not_member() {
         let mut z = Value::new_sorted_set();
         // Member-lexicographic order (a, b, c) differs from score order (c, a, b)
-        z.zadd(&[("a".into(), 2.0), ("b".into(), 3.0), ("c".into(), 1.0)]).unwrap();
+        z.zadd(&[("a".into(), 2.0), ("b".into(), 3.0), ("c".into(), 1.0)])
+            .unwrap();
         assert_eq!(z.zrange(0, -1, false).unwrap(), vec!["c", "a", "b"]);
         assert_eq!(z.zrevrange(0, -1, false).unwrap(), vec!["b", "a", "c"]);
         assert_eq!(z.zrank("c").unwrap(), Some(0));
@@ -777,7 +817,8 @@ mod tests {
     #[test]
     fn test_zrange_negative_stop_out_of_range() {
         let mut z = Value::new_sorted_set();
-        z.zadd(&[("a".into(), 1.0), ("b".into(), 2.0), ("c".into(), 3.0)]).unwrap();
+        z.zadd(&[("a".into(), 1.0), ("b".into(), 2.0), ("c".into(), 3.0)])
+            .unwrap();
         // Previously overflowed (panic in debug builds)
         assert!(z.zrange(0, -10, false).unwrap().is_empty());
         assert!(z.zrevrange(0, -10, false).unwrap().is_empty());

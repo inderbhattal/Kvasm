@@ -39,7 +39,9 @@ async fn sleep_ms(ms: i32) {
             .unwrap()
             .dyn_into()
             .unwrap();
-        set_timeout.call2(&global, &resolve, &JsValue::from(ms)).unwrap();
+        set_timeout
+            .call2(&global, &resolve, &JsValue::from(ms))
+            .unwrap();
     });
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }

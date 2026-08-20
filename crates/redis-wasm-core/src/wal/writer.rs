@@ -1,8 +1,8 @@
 //! WAL Writer trait and native implementation
 
 use crate::wal::log::{WalEntry, WalError};
-use std::sync::Arc;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Trait for WAL writers - allows different implementations (native, WASM/IndexedDB)
 #[async_trait]

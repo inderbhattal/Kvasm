@@ -51,8 +51,8 @@ impl WasmPubSub {
         let state = self.channel_state(channel)?;
 
         let envelope = PubSubMessage::new(channel.to_string(), message.to_string());
-        let json = serde_json::to_string(&envelope)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let json =
+            serde_json::to_string(&envelope).map_err(|e| JsValue::from_str(&e.to_string()))?;
         state
             .broadcast
             .post_message(&JsValue::from_str(&json))

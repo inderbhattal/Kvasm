@@ -1,7 +1,7 @@
 //! Pub/Sub implementation
 
-use std::sync::Arc;
 use dashmap::DashMap;
+use std::sync::Arc;
 
 #[cfg(feature = "native")]
 use tokio::sync::broadcast;
@@ -50,19 +50,22 @@ impl Channel {
     /// Subscribe to the channel
     #[cfg(feature = "native")]
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
-        self.subscriber_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.subscriber_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.tx.subscribe()
     }
 
     /// Subscribe to the channel (WASM stub)
     #[cfg(not(feature = "native"))]
     pub fn subscribe(&self) {
-        self.subscriber_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.subscriber_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get subscriber count
     pub fn subscriber_count(&self) -> usize {
-        self.subscriber_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.subscriber_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -170,7 +173,11 @@ impl PubSubMessage {
         // current_time_ms is wasm-safe; SystemTime::now() panics on
         // wasm32-unknown-unknown.
         let timestamp = crate::expiry::current_time_ms();
-        Self { channel, message, timestamp }
+        Self {
+            channel,
+            message,
+            timestamp,
+        }
     }
 }
 
