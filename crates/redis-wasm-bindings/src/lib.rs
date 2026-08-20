@@ -49,6 +49,17 @@ fn sync_clock() {
     redis_wasm_core::expiry::set_now_ms(js_sys::Date::now() as u64);
 }
 
+/// Validate that a JS number is a safe integer delta for INCRBY/DECRBY —
+/// fractions and values past 2^53 would silently change the increment.
+fn safe_integer(delta: f64) -> Result<i64, JsValue> {
+    const MAX_SAFE: f64 = 9_007_199_254_740_991.0; // Number.MAX_SAFE_INTEGER
+    if delta.fract() == 0.0 && delta.abs() <= MAX_SAFE {
+        Ok(delta as i64)
+    } else {
+        Err(JsValue::from_str("ERR value is not an integer or out of range"))
+    }
+}
+
 impl WasmDb {
     /// Shared-state handle to the underlying database
     pub(crate) fn inner(&self) -> &RedisWasmDb {
@@ -193,6 +204,44 @@ impl WasmDb {
     #[wasm_bindgen(js_name = "setrange")]
     pub async fn setrange(&self, key: &str, offset: u32, value: &str) -> Result<usize, JsValue> {
         Ok(self.db().setrange(key, offset as usize, value.as_bytes()).await.to_js_value()?)
+    }
+
+    // Counter commands. Results come back as JS numbers, so counters beyond
+    // Number.MAX_SAFE_INTEGER (2^53 - 1) lose precision at the JS boundary
+    // even though the stored value stays exact.
+
+    /// INCR key — increment by one, creating the key at 0 if missing.
+    /// Preserves the key's TTL.
+    #[wasm_bindgen(js_name = "incr")]
+    pub async fn incr(&self, key: &str) -> Result<f64, JsValue> {
+        Ok(self.db().incr(key).await.to_js_value()? as f64)
+    }
+
+    /// DECR key — decrement by one
+    #[wasm_bindgen(js_name = "decr")]
+    pub async fn decr(&self, key: &str) -> Result<f64, JsValue> {
+        Ok(self.db().decr(key).await.to_js_value()? as f64)
+    }
+
+    /// INCRBY key delta (delta must be a safe integer)
+    #[wasm_bindgen(js_name = "incrby")]
+    pub async fn incrby(&self, key: &str, delta: f64) -> Result<f64, JsValue> {
+        Ok(self.db().incr_by(key, safe_integer(delta)?).await.to_js_value()? as f64)
+    }
+
+    /// DECRBY key delta (delta must be a safe integer)
+    #[wasm_bindgen(js_name = "decrby")]
+    pub async fn decrby(&self, key: &str, delta: f64) -> Result<f64, JsValue> {
+        let delta = safe_integer(delta)?.checked_neg().ok_or_else(|| {
+            JsValue::from_str("ERR value is not an integer or out of range")
+        })?;
+        Ok(self.db().incr_by(key, delta).await.to_js_value()? as f64)
+    }
+
+    /// INCRBYFLOAT key delta
+    #[wasm_bindgen(js_name = "incrbyfloat")]
+    pub async fn incrbyfloat(&self, key: &str, delta: f64) -> Result<f64, JsValue> {
+        Ok(self.db().incr_by_float(key, delta).await.to_js_value()?)
     }
 
     // List commands

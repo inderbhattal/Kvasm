@@ -24,6 +24,10 @@ pub enum DbError {
     PubSubError(String),
     #[error("Invalid pattern: {0}")]
     InvalidPattern(String),
+    #[error("ERR value is not an integer or out of range")]
+    NotAnInteger,
+    #[error("ERR value is not a valid float")]
+    NotAFloat,
 }
 
 /// Compact the WAL once it holds this many entries (see
@@ -479,6 +483,93 @@ impl RedisWasmDb {
         self.write_wal(&wal_entry).await?;
 
         Ok(new_len)
+    }
+
+    /// Increment the integer value of a key by `delta` (INCR/DECR/INCRBY/
+    /// DECRBY), returning the new value. A missing key counts from 0, and
+    /// the key's TTL is preserved (Redis semantics — unlike SET).
+    pub async fn incr_by(&self, key: &str, delta: i64) -> Result<i64, DbError> {
+        if self.expiry.is_expired(key) {
+            self.del(&[key])?;
+        }
+
+        // Scoped so the map guard drops before the WAL await below.
+        let (new_value, wal_entry) = {
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_empty_string);
+            let bytes = entry.as_bytes_mut().ok_or(TypeError::WrongType)?;
+            let current: i64 = if bytes.is_empty() {
+                0
+            } else {
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or(DbError::NotAnInteger)?
+            };
+            let new_value = current.checked_add(delta).ok_or(DbError::NotAnInteger)?;
+            *bytes = new_value.to_string().into_bytes();
+            let wal_entry = WalEntry::Set {
+                key: key.to_string(),
+                value: bytes.clone(),
+                expiry: self.expiry.get_expiry_ms(key),
+            };
+            (new_value, wal_entry)
+        };
+        self.write_wal(&wal_entry).await?;
+
+        Ok(new_value)
+    }
+
+    /// Increment by one (INCR)
+    pub async fn incr(&self, key: &str) -> Result<i64, DbError> {
+        self.incr_by(key, 1).await
+    }
+
+    /// Decrement by one (DECR)
+    pub async fn decr(&self, key: &str) -> Result<i64, DbError> {
+        self.incr_by(key, -1).await
+    }
+
+    /// Increment the float value of a key by `delta` (INCRBYFLOAT),
+    /// returning the new value. A missing key counts from 0; the result
+    /// must be a finite number; the TTL is preserved.
+    pub async fn incr_by_float(&self, key: &str, delta: f64) -> Result<f64, DbError> {
+        if self.expiry.is_expired(key) {
+            self.del(&[key])?;
+        }
+
+        let (new_value, wal_entry) = {
+            let mut entry = self
+                .data
+                .entry(key.to_string())
+                .or_insert_with(Value::new_empty_string);
+            let bytes = entry.as_bytes_mut().ok_or(TypeError::WrongType)?;
+            let current: f64 = if bytes.is_empty() {
+                0.0
+            } else {
+                std::str::from_utf8(bytes)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .filter(|v: &f64| v.is_finite())
+                    .ok_or(DbError::NotAFloat)?
+            };
+            let new_value = current + delta;
+            if !new_value.is_finite() {
+                return Err(DbError::NotAFloat);
+            }
+            *bytes = new_value.to_string().into_bytes();
+            let wal_entry = WalEntry::Set {
+                key: key.to_string(),
+                value: bytes.clone(),
+                expiry: self.expiry.get_expiry_ms(key),
+            };
+            (new_value, wal_entry)
+        };
+        self.write_wal(&wal_entry).await?;
+
+        Ok(new_value)
     }
 
     // ========================================================================
@@ -1367,6 +1458,63 @@ mod tests {
         keys.sort();
         assert_eq!(keys, vec!["a+b", "axb"]);
         assert_eq!(db.keys("a*").unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_incr_family() {
+        let db = RedisWasmDb::new();
+
+        // Missing key counts from 0
+        assert_eq!(db.incr("n").await.unwrap(), 1);
+        assert_eq!(db.incr_by("n", 41).await.unwrap(), 42);
+        assert_eq!(db.decr("n").await.unwrap(), 41);
+        assert_eq!(db.incr_by("n", -41).await.unwrap(), 0);
+        assert_eq!(db.get("n").unwrap(), Some("0".to_string()));
+
+        // Non-integer values and non-string types error
+        db.set("s", "abc".to_string()).await.unwrap();
+        assert!(matches!(db.incr("s").await, Err(DbError::NotAnInteger)));
+        db.rpush("l", &["a".into()]).await.unwrap();
+        assert!(matches!(db.incr("l").await, Err(DbError::WrongType(_))));
+
+        // Overflow errors instead of wrapping, value untouched
+        db.set("max", i64::MAX.to_string()).await.unwrap();
+        assert!(matches!(db.incr("max").await, Err(DbError::NotAnInteger)));
+        assert_eq!(db.get("max").unwrap(), Some(i64::MAX.to_string()));
+
+        // TTL is preserved (unlike SET)
+        db.set("counter", "10".to_string()).await.unwrap();
+        db.expire("counter", 1000).await.unwrap();
+        db.incr("counter").await.unwrap();
+        assert!(db.ttl("counter").unwrap() > 0);
+
+        // Floats
+        assert_eq!(db.incr_by_float("f", 1.5).await.unwrap(), 1.5);
+        assert_eq!(db.incr_by_float("f", 2.25).await.unwrap(), 3.75);
+        assert_eq!(db.get("f").unwrap(), Some("3.75".to_string()));
+        assert!(matches!(
+            db.incr_by_float("f", f64::INFINITY).await,
+            Err(DbError::NotAFloat)
+        ));
+        // An integer counter is a valid float target, not vice versa
+        assert_eq!(db.incr_by_float("n", 0.5).await.unwrap(), 0.5);
+        assert!(matches!(db.incr("n").await, Err(DbError::NotAnInteger)));
+    }
+
+    #[tokio::test]
+    async fn test_incr_survives_snapshot_replay() {
+        let db = RedisWasmDb::new();
+        db.incr_by("hits", 7).await.unwrap();
+        db.expire("hits", 1000).await.unwrap();
+
+        let restored = Arc::new(RedisWasmDb::new());
+        let mut reader = crate::wal::VecWalReader::new(db.snapshot_entries());
+        crate::wal::WalReplayer::new(restored.clone())
+            .replay(&mut reader)
+            .await
+            .unwrap();
+        assert_eq!(restored.incr("hits").await.unwrap(), 8);
+        assert!(restored.ttl("hits").unwrap() > 0);
     }
 
     #[tokio::test]

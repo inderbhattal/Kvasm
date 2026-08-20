@@ -9,7 +9,8 @@ through IndexedDB and cross-tab messaging through `BroadcastChannel`.
 ## Features
 
 - **Redis-compatible commands**: `SET`/`GET`, `DEL`, `EXISTS`, `TYPE`, `KEYS`
-  (glob patterns), `APPEND`, `GETRANGE`/`SETRANGE`, `LPUSH`/`RPUSH`/`LPOP`/
+  (glob patterns), `INCR`/`DECR`/`INCRBY`/`DECRBY`/`INCRBYFLOAT`,
+  `APPEND`, `GETRANGE`/`SETRANGE`, `LPUSH`/`RPUSH`/`LPOP`/
   `RPOP`/`LRANGE`/`LREM`/`LTRIM`, `SADD`/`SREM`/`SINTER`/`SUNION`/`SDIFF`,
   `ZADD`/`ZRANGE`/`ZRANK`/`ZRANGEBYSCORE`, `HSET`/`HGETALL`/`HDEL`,
   `EXPIRE`/`TTL`/`PERSIST`, and more
@@ -59,6 +60,11 @@ const cleaner = db.startExpiryCleaner();
 await db.set("session:42", "alice", 3600); // EX seconds (optional)
 db.get("session:42");                      // "alice"
 db.ttl("session:42");                      // 3600
+
+// Counters (a key's TTL survives increments, like Redis)
+await db.incr("hits");                     // 1
+await db.incrby("hits", 41);               // 42
+await db.incrbyfloat("ratio", 0.25);       // 0.25
 
 // Lists
 await db.rpush("queue", ["a", "b", "c"]);

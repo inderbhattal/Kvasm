@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: Core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Core tests (default features)
+        run: cargo test -p redis-wasm-core
+      - name: Core tests (native feature)
+        run: cargo test -p redis-wasm-core --features native
+
+  wasm:
+    name: WASM build + browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Type-check bindings and test suites
+        run: cargo check -p redis-wasm-bindings --target wasm32-unknown-unknown --all-targets
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build package
+        run: wasm-pack build crates/redis-wasm-bindings --target web --out-dir ../../pkg
+      # Runs both suites: tests/browser.rs (run_in_browser) and
+      # tests/worker.rs (run_in_dedicated_worker). Chrome and chromedriver
+      # are preinstalled on GitHub's ubuntu runners.
+      - name: Browser tests (headless Chrome)
+        run: wasm-pack test --headless --chrome crates/redis-wasm-bindings

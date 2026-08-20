@@ -155,6 +155,37 @@ async fn expiry_cleaner_removes_expired_keys() {
 }
 
 #[wasm_bindgen_test]
+async fn counters_increment_and_persist() {
+    seed_clock();
+    let name = unique_db_name("counters");
+
+    {
+        let db = WasmDb::with_persistence(&name).await.unwrap();
+        assert_eq!(db.incr("hits").await.unwrap(), 1.0);
+        assert_eq!(db.incrby("hits", 9.0).await.unwrap(), 10.0);
+        assert_eq!(db.decrby("hits", 3.0).await.unwrap(), 7.0);
+        assert_eq!(db.decr("hits").await.unwrap(), 6.0);
+        assert_eq!(db.incrbyfloat("ratio", 0.5).await.unwrap(), 0.5);
+
+        // TTL survives increments (unlike SET)
+        db.expire("hits", 3600).await.unwrap();
+        db.incr("hits").await.unwrap();
+        assert!(db.ttl("hits").unwrap() > 0);
+
+        // Fractional and unsafe integer deltas are rejected
+        assert!(db.incrby("hits", 1.5).await.is_err());
+        assert!(db.incr("ratio").await.is_err()); // float value, integer op
+
+        db.save().await.unwrap();
+    }
+
+    let db = WasmDb::with_persistence(&name).await.unwrap();
+    assert_eq!(db.incr("hits").await.unwrap(), 8.0);
+    assert!(db.ttl("hits").unwrap() > 0);
+    assert_eq!(db.get("ratio").unwrap(), Some("0.5".to_string()));
+}
+
+#[wasm_bindgen_test]
 async fn pubsub_delivers_to_local_subscribers() {
     let mut pubsub = WasmPubSub::new();
     let mut sub = pubsub.subscribe("chat").unwrap();

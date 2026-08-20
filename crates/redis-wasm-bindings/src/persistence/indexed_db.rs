@@ -87,17 +87,25 @@ impl IndexedDbWal {
         Ok(database)
     }
 
-    /// Append a WAL entry under a fresh auto-increment key
-    async fn append_entry(&self, entry: &WalEntry) -> Result<(), WalError> {
-        let js_entry = wal_entry_to_js_value(entry)
-            .map_err(|e| WalError::IndexedDb(format!("{:?}", e)))?;
+    /// Append a batch of WAL entries under fresh auto-increment keys, all in
+    /// one readwrite transaction. Committing per batch instead of per entry
+    /// is what makes bursts of writes cheap; atomicity is unchanged — a
+    /// crash loses at most a suffix of recent appends, exactly as before.
+    async fn append_batch(&self, entries: &[WalEntry]) -> Result<(), WalError> {
+        let js_entries: Vec<JsValue> = entries
+            .iter()
+            .map(|e| wal_entry_to_js_value(e).map_err(|err| WalError::IndexedDb(format!("{:?}", err))))
+            .collect::<Result<_, _>>()?;
         let store_name = self.store_name.clone();
 
         self.db
             .transaction(&[&store_name])
             .rw()
             .run(move |tx: Transaction<JsValue>| async move {
-                tx.object_store(&store_name)?.add(&js_entry).await?;
+                let store = tx.object_store(&store_name)?;
+                for entry in &js_entries {
+                    store.add(entry).await?;
+                }
                 Ok(())
             })
             .await
@@ -205,12 +213,36 @@ impl WasmWalWriter {
             // once an entry is lost the log stays incomplete until a rewrite
             // replaces it wholesale, so flushes keep reporting the failure.
             let mut append_error: Option<String> = None;
-            while let Some(cmd) = receiver.next().await {
+            // A non-append command drained while batching, to run after the
+            // batch commits (queue order is preserved).
+            let mut deferred: Option<WalCommand> = None;
+            loop {
+                let cmd = match deferred.take() {
+                    Some(cmd) => cmd,
+                    None => match receiver.next().await {
+                        Some(cmd) => cmd,
+                        None => break,
+                    },
+                };
                 match cmd {
                     WalCommand::Append(entry) => {
-                        if let Err(e) = wal.append_entry(&entry).await {
+                        // Batch every append already sitting in the queue
+                        // into one IndexedDB transaction.
+                        let mut batch = vec![entry];
+                        while let Ok(Some(next)) = receiver.try_next() {
+                            match next {
+                                WalCommand::Append(entry) => batch.push(entry),
+                                other => {
+                                    deferred = Some(other);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Err(e) = wal.append_batch(&batch).await {
                             web_sys::console::error_1(&JsValue::from_str(&format!(
-                                "redis-wasm: WAL write failed: {}",
+                                "redis-wasm: WAL write of {} entr{} failed: {}",
+                                batch.len(),
+                                if batch.len() == 1 { "y" } else { "ies" },
                                 e
                             )));
                             append_error.get_or_insert_with(|| e.to_string());
